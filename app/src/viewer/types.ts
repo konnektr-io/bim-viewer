@@ -53,8 +53,13 @@ export type CircuitPset = Record<string, string>;
 export interface PropertySet {
   /** Real IFC set name, e.g. `Pset_ElectricalCircuit` or `Qto_WallBaseQuantities`. */
   name: string;
-  /** `qto` for `Qto_*` sets, `type` for sets found under `RelatingType`, else `pset`. */
+  /**
+   * `pset` for `IfcPropertySet`, `qto` for `IfcElementQuantity`, `type` for a
+   * set that is only defined on the element's type object.
+   */
   kind: "pset" | "qto" | "type";
+  /** The set's own `_localId` in the model, for diagnostics and quoting. */
+  localId: number | null;
   /** Flattened `property name -> value`, in payload order. */
   properties: Record<string, string>;
 }
@@ -80,6 +85,8 @@ export interface Selection {
   propertySets: PropertySet[];
   /** Material layers (IfcMaterialLayerSet), empty when the element has none. */
   materialLayers: MaterialLayer[];
+  /** Name of the material layer set, e.g. the wall build-up. */
+  materialLayerSetName: string | null;
   /** Name of the IfcType the element is defined by, when present. */
   typeName: string | null;
   /**

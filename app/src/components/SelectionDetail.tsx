@@ -72,7 +72,7 @@ export function SelectionDetail() {
 
   // The circuit set also lives in propertySets; don't render it twice.
   const otherSets: PropertySet[] = (selection.propertySets ?? []).filter(
-    (set) => set.name !== "Pset_ElectricalCircuit" || set.kind === "type",
+    (set) => set.name !== "Pset_ElectricalCircuit",
   );
 
   const filterSet = (set: PropertySet): Array<[string, string]> =>
@@ -95,6 +95,8 @@ export function SelectionDetail() {
     : otherSets.map((set) => ({ set, rows: Object.entries(set.properties) }));
 
   const attributeRows = Object.entries(selection.attributes)
+    // `Name` is already in the identity block above; repeating it here is noise.
+    .filter(([key]) => key !== "Name")
     .sort(([a], [b]) => a.localeCompare(b))
     .filter(([k, v]) => matches(k, v));
   const shown = showAll || query ? attributeRows : attributeRows.slice(0, 8);
@@ -184,6 +186,7 @@ export function SelectionDetail() {
               <PsetGroup
                 name={set.kind === "type" ? `${set.name} (type)` : set.name}
                 badge={set.kind === "qto" ? "Qto" : set.kind === "type" ? "type" : undefined}
+                count={rows.length}
                 testId={`pset-group-${set.name}`}
               >
                 {rows.map(([key, value]) => (
@@ -196,7 +199,12 @@ export function SelectionDetail() {
           {materialRows.length > 0 ? (
             <>
               <Separator className="my-3" />
-              <PsetGroup name="Materials" testId="pset-group-Materials">
+              <PsetGroup
+                name={selection.materialLayerSetName ?? "Materials"}
+                badge="layers"
+                count={materialRows.length}
+                testId="pset-group-Materials"
+              >
                 {materialRows.map((layer, index) => (
                   <Row
                     key={`${layer.name}-${index}`}
@@ -235,12 +243,14 @@ export function SelectionDetail() {
 function PsetGroup({
   name,
   badge,
+  count,
   defaultOpen = false,
   testId,
   children,
 }: {
   name: string;
   badge?: string;
+  count?: number;
   defaultOpen?: boolean;
   testId?: string;
   children: React.ReactNode;
@@ -266,6 +276,11 @@ function PsetGroup({
           <span className="truncate" title={name}>
             {name}
           </span>
+          {count !== undefined ? (
+            <span className="shrink-0 text-[10px] normal-case tracking-normal">
+              {count}
+            </span>
+          ) : null}
           {badge ? (
             <span className="shrink-0 rounded border px-1 text-[10px] normal-case tracking-normal">
               {badge}
