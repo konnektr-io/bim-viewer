@@ -282,6 +282,9 @@ export class ViewerEngine {
       for (const child of children) this.elementToRoom.set(child, roomId);
     }
 
+    // Fragments materialises the geometry into the scene graph asynchronously,
+    // so measuring the meshes here would find an empty scene. Wait for them.
+    await this.waitForGeometry();
     await this.fitCamera();
 
     const storeys: Storey[] = storeyIds.map((id) => ({
@@ -392,6 +395,30 @@ export class ViewerEngine {
    *    outside it.
    */
   /**
+   * Wait until the scene actually contains meshes.
+   *
+   * Fragments builds the geometry after the model is handed over, so any
+   * measurement taken immediately afterwards sees an empty scene and the
+   * camera gets framed on nothing. Poll the render loop rather than guessing a
+   * delay.
+   */
+  private async waitForGeometry(timeoutMs = 10_000): Promise<boolean> {
+    const world = this.world;
+    if (!world) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      let meshes = 0;
+      world.scene.three.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) meshes += 1;
+      });
+      if (meshes > 0) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    console.warn("No meshes appeared in the scene before the timeout");
+    return false;
+  }
+
+  /**
    * The box the camera is framed on, measured from the RENDERED geometry.
    *
    * The Fragments box APIs are useless for framing on this model: `getBoxes()`,
@@ -413,25 +440,53 @@ export class ViewerEngine {
     model.object.updateWorldMatrix(true, true);
     const boxes: Array<{ box: THREE.Box3; span: number }> = [];
 
-    model.object.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh || !mesh.geometry) return;
-      const geometry = mesh.geometry as THREE.BufferGeometry;
-      if (!geometry.boundingBox) {
-        try {
-          geometry.computeBoundingBox();
-        } catch {
-          return; // LOD geometry that will not compute; skip it
+    const collect = (root: THREE.Object3D): void => {
+      root.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry) return;
+        const geometry = mesh.geometry as THREE.BufferGeometry;
+        if (!geometry.boundingBox) {
+          try {
+            geometry.computeBoundingBox();
+          } catch {
+            return; // LOD geometry that will not compute; skip it
+          }
         }
-      }
-      const local = geometry.boundingBox;
-      if (!local || local.isEmpty()) return;
-      const world = local.clone().applyMatrix4(mesh.matrixWorld);
-      const size = world.getSize(new THREE.Vector3());
-      boxes.push({ box: world, span: size.length() });
-    });
+        const local = geometry.boundingBox;
+        if (!local || local.isEmpty()) return;
+        mesh.updateWorldMatrix(true, false);
+        const world = local.clone().applyMatrix4(mesh.matrixWorld);
+        boxes.push({ box: world, span: world.getSize(new THREE.Vector3()).length() });
+      });
+    };
 
-    if (!boxes.length) return bounds;
+    collect(model.object);
+    // Fragments puts the real geometry under children of the model object that
+    // are only populated after the first render tick. If the walk above found
+    // nothing, try again over the whole scene graph.
+    if (!boxes.length) {
+      this.world?.scene.three.traverse((obj) => {
+        if (boxes.length) return;
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry) return;
+        const geometry = mesh.geometry as THREE.BufferGeometry;
+        try {
+          if (!geometry.boundingBox) geometry.computeBoundingBox();
+        } catch {
+          return;
+        }
+        const local = geometry.boundingBox;
+        if (!local || local.isEmpty()) return;
+        mesh.updateWorldMatrix(true, false);
+        const world = local.clone().applyMatrix4(mesh.matrixWorld);
+        boxes.push({ box: world, span: world.getSize(new THREE.Vector3()).length() });
+      });
+    }
+
+    if (!boxes.length) {
+      this.boundsTrace = { ...this.boundsTrace, path: "rendered-empty" };
+      return bounds;
+    }
 
     // Median mesh span: the house is made of many similar-sized pieces, so the
     // median is a robust scale even when a couple of meshes are nonsense.
@@ -502,6 +557,7 @@ export class ViewerEngine {
 
   /** Frame everything currently visible — the "I lost the model" button. */
   async frameAll(): Promise<{ visible: number; total: number }> {
+    await this.waitForGeometry();
     await this.fitCamera();
     const { visible, total } = this.visibility();
     return { visible, total };
@@ -514,6 +570,8 @@ export class ViewerEngine {
   async setView(preset: ViewPreset): Promise<void> {
     const world = this.world;
     if (!world) return;
+
+    await this.waitForGeometry();
 
     const bounds =
       this.lastBounds && !this.lastBounds.isEmpty()
