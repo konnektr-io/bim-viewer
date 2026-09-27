@@ -15,6 +15,8 @@ import * as THREE from "three";
 import {
   type CircuitPset,
   type ItemData,
+  type MaterialLayer,
+  type PropertySet,
   type Room,
   type Selection,
   type Storey,
@@ -50,53 +52,268 @@ const asString = (value: unknown): string | null => {
   return String(v);
 };
 
+/** Read a single wrapped value key, e.g. `NominalValue` or `LengthValue`. */
+function propText(entry: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    if (!(key in entry)) continue;
+    const text = asString(entry[key]);
+    if (text !== null) return text;
+  }
+  return null;
+}
+
 /**
- * Find `Pset_ElectricalCircuit` in an item payload, WITHOUT recursing forever.
+ * Flatten one `IfcPropertySet.HasProperties` entry to `name -> value`.
  *
- * Property sets arrive nested under IsDefinedBy -> IfcRelDefinesByProperties
- * rather than as a flat record, so the object graph has to be walked. It must
- * be walked ITERATIVELY: requesting
- * `relations: { IsDefinedBy: { relations: true } }` pulls in the whole relation
- * graph, and IFC relations are CYCLIC (IfcRelAggregates.Nests points at
- * IsDecomposedBy, which points back at Nests). The original recursive version
- * therefore blew the stack on every click with
- * "Maximum call stack size exceeded".
+ * Handles `IfcPropertySingleValue` (`NominalValue`), enumerated values and
+ * bounded values (`UnitBasedValue`). Entries without a name or without any
+ * readable value are skipped so empty rows never reach the panel.
  */
-function findCircuitPset(root: unknown): CircuitPset | null {
+function readPsetEntry(entry: unknown): [string, string] | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  const key = asString(record.Name);
+  if (!key) return null;
+  const value = propText(
+    record,
+    "NominalValue",
+    "UnitBasedValue",
+    "EnumerationValues",
+    "LowerBoundValue",
+    "UpperBoundValue",
+  );
+  if (value === null) return null;
+  return [key, value];
+}
+
+/**
+ * Flatten one `IfcElementQuantity.Quantities` entry to `name -> value`.
+ *
+ * Quantity kinds carry different value keys (`LengthValue`, `AreaValue`,
+ * `VolumeValue`, `CountValue`, `WeightValue`, `TimeValue`), so try them all.
+ */
+function readQuantityEntry(entry: unknown): [string, string] | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  const key = asString(record.Name);
+  if (!key) return null;
+  const value = propText(
+    record,
+    "LengthValue",
+    "AreaValue",
+    "VolumeValue",
+    "CountValue",
+    "WeightValue",
+    "TimeValue",
+    "NominalValue",
+  );
+  if (value === null) return null;
+  return [key, value];
+}
+
+/**
+ * Find every property set in an item payload, WITHOUT recursing forever.
+ *
+ * Property sets arrive nested under `IsDefinedBy -> IfcRelDefinesByProperties
+ * -> RelatingPropertyDefinition` (IFC4X3; IFC4 called the link
+ * `RelatedPropertySet`) rather than as a flat record, and type-object
+ * properties arrive under `IsTypedBy -> IfcRelDefinesByType -> RelatingType`,
+ * so the object graph has to be walked. It must be walked ITERATIVELY:
+ * requesting `relations: { IsDefinedBy: { relations: true } }` pulls in the
+ * whole relation graph, and IFC relations are CYCLIC (IfcRelAggregates.Nests
+ * points at IsDecomposedBy, which points back at Nests). The original
+ * recursive version therefore blew the stack on every click with
+ * "Maximum call stack size exceeded".
+ *
+ * Sets found anywhere under a `RelatingType` key are tagged `kind: "type"`;
+ * `Qto_*` sets are tagged `"qto"`. Duplicates from cyclic paths are merged by
+ * name so each set renders once.
+ */
+function findAllPropertySets(root: unknown): { sets: PropertySet[]; typeName: string | null } {
   const seen = new WeakSet<object>();
-  const stack: Array<{ node: unknown; depth: number }> = [{ node: root, depth: 0 }];
-  const MAX_DEPTH = 12;
-  let budget = 20_000;
+  const stack: Array<{ node: unknown; depth: number; inType: boolean }> = [
+    { node: root, depth: 0, inType: false },
+  ];
+  const MAX_DEPTH = 14;
+  let budget = 50_000;
+  const merged = new Map<string, PropertySet>();
+  const order: string[] = [];
+  let typeName: string | null = null;
+
+  const addSet = (name: string, kind: PropertySet["kind"], props: Record<string, string>): void => {
+    const key = `${kind}#${name}`;
+    const existing = merged.get(key);
+    if (existing) {
+      for (const [k, v] of Object.entries(props)) {
+        if (!(k in existing.properties)) existing.properties[k] = v;
+      }
+      return;
+    }
+    merged.set(key, { name, kind, properties: { ...props } });
+    order.push(key);
+  };
 
   while (stack.length > 0 && budget-- > 0) {
-    const { node, depth } = stack.pop()!;
+    const { node, depth, inType } = stack.pop()!;
     if (!node || typeof node !== "object") continue;
     if (seen.has(node)) continue;
     seen.add(node);
     if (depth > MAX_DEPTH) continue;
 
     if (Array.isArray(node)) {
-      for (const child of node) stack.push({ node: child, depth: depth + 1 });
+      for (const child of node) stack.push({ node: child, depth: depth + 1, inType });
       continue;
     }
 
     const record = node as Record<string, unknown>;
-    if (record.Name === "Pset_ElectricalCircuit" && Array.isArray(record.HasProperties)) {
-      const out: CircuitPset = {};
-      for (const entry of record.HasProperties as Array<Record<string, unknown>>) {
-        const key = asString(entry?.Name);
-        if (!key) continue;
-        const value = asString(entry.NominalValue ?? entry.UnitBasedValue);
-        if (value !== null) out[key] = value;
+
+    // Any object with a set name + HasProperties is a property set, wherever
+    // it sits in the graph (occurrence IsDefinedBy, or type RelatingType).
+    if (typeof record.Name === "string" && Array.isArray(record.HasProperties)) {
+      const setName = unwrap(record.Name);
+      if (typeof setName === "string" && setName !== "") {
+        const props: Record<string, string> = {};
+        for (const entry of record.HasProperties as unknown[]) {
+          const pair = readPsetEntry(entry);
+          if (pair) props[pair[0]] = pair[1];
+        }
+        if (Object.keys(props).length > 0) {
+          const kind: PropertySet["kind"] = inType
+            ? "type"
+            : setName.startsWith("Qto_")
+              ? "qto"
+              : "pset";
+          addSet(setName, kind, props);
+        }
       }
-      return out;
+    }
+
+    // IfcElementQuantity carries Quantities instead of HasProperties.
+    if (typeof record.Name === "string" && Array.isArray(record.Quantities)) {
+      const setName = unwrap(record.Name);
+      if (typeof setName === "string" && setName !== "") {
+        const props: Record<string, string> = {};
+        for (const entry of record.Quantities as unknown[]) {
+          const pair = readQuantityEntry(entry);
+          if (pair) props[pair[0]] = pair[1];
+        }
+        if (Object.keys(props).length > 0) {
+          addSet(setName, inType ? "type" : "qto", props);
+        }
+      }
+    }
+
+    for (const [key, value] of Object.entries(record)) {
+      // Everything nested under a RelatingType link belongs to the TYPE
+      // object, not the occurrence — that is where the interesting defaults
+      // live. IFC4X3 links psets via RelatingPropertyDefinition; accept the
+      // IFC4 RelatedPropertySet shape too so both schemas walk.
+      const childInType = inType || key === "RelatingType";
+      if (key === "RelatingType" && value && typeof value === "object" && !Array.isArray(value)) {
+        const typeRec = value as Record<string, unknown>;
+        const name = asString(typeRec.Name);
+        if (name && typeName === null) typeName = name;
+      }
+      stack.push({ node: value, depth: depth + 1, inType: childInType });
+    }
+  }
+  return { sets: order.map((k) => merged.get(k)!), typeName };
+}
+
+/**
+ * Find `Pset_ElectricalCircuit` in an item payload, WITHOUT recursing forever.
+ *
+ * Thin wrapper over {@link findAllPropertySets} kept so the labelled circuit
+ * rows keep working: the panel renders the full set list generically and uses
+ * this only for the hand-labelled circuit block.
+ */
+function findCircuitPset(root: unknown): CircuitPset | null {
+  const { sets } = findAllPropertySets(root);
+  const found = sets.find((s) => s.name === "Pset_ElectricalCircuit" && s.kind !== "type");
+  if (!found) {
+    const typed = sets.find((s) => s.name === "Pset_ElectricalCircuit");
+    return typed ? { ...typed.properties } : null;
+  }
+  return { ...found.properties };
+}
+
+/**
+ * Find material layers (`IfcMaterialLayerSet -> IfcMaterialLayer`) in an item
+ * payload, iteratively for the same cyclic-graph reason as the psets above.
+ *
+ * Returns one entry per layer with the material name and the layer thickness
+ * when the model carries it. A directly-associated single material
+ * (`IfcRelAssociatesMaterial -> RelatingMaterial.Name`) yields one entry with
+ * a null thickness.
+ */
+function findMaterialLayers(root: unknown): MaterialLayer[] {
+  const seen = new WeakSet<object>();
+  const stack: unknown[] = [root];
+  let budget = 20_000;
+  const layers: MaterialLayer[] = [];
+  const singles: MaterialLayer[] = [];
+
+  while (stack.length > 0 && budget-- > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+
+    const record = node as Record<string, unknown>;
+
+    // A layer: thickness + a material reference with a name.
+    if ("LayerThickness" in record && "Material" in record) {
+      const thickness = asString(record.LayerThickness);
+      const material = record.Material as unknown;
+      const name =
+        material && typeof material === "object" && !Array.isArray(material)
+          ? asString((material as Record<string, unknown>).Name)
+          : null;
+      if (name) {
+        layers.push({ name, thickness });
+        continue;
+      }
+    }
+
+    // A directly-associated material arrives as IfcRelAssociatesMaterial ->
+    // RelatingMaterial. A layer set carries MaterialLayers; a single material
+    // carries just a Name.
+    if ("RelatingMaterial" in record && record.RelatingMaterial && typeof record.RelatingMaterial === "object") {
+      const mat = record.RelatingMaterial as Record<string, unknown>;
+      const name = asString(mat.Name);
+      if (name) {
+        // A layer set carries MaterialLayers; a single material does not.
+        if (Array.isArray(mat.MaterialLayers)) {
+          for (const entry of mat.MaterialLayers as unknown[]) stack.push(entry);
+        } else {
+          singles.push({ name, thickness: null });
+        }
+        continue;
+      }
+      stack.push(record.RelatingMaterial);
+      continue;
     }
 
     for (const value of Object.values(record)) {
-      stack.push({ node: value, depth: depth + 1 });
+      stack.push(value);
     }
   }
-  return null;
+
+  // De-duplicate: the same layer set is reachable through several paths.
+  const seenKey = new Set<string>();
+  const out: MaterialLayer[] = [];
+  for (const entry of [...layers, ...singles]) {
+    const key = `${entry.name}#${entry.thickness ?? ""}`;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
+    out.push(entry);
+  }
+  return out;
 }
 
 /**
@@ -147,6 +364,8 @@ export class ViewerEngine {
   private lastBounds: THREE.Box3 | null = null;
   /** Currently active storey filter, or null for the whole model. */
   private activeStorey: number | null = null;
+  /** Last reported selection, kept for the headless diagnostics probe. */
+  private lastSelection: Selection | null = null;
   /** Storey-band box, kept for diagnostics. */
   private storeyBoxForDiag: THREE.Box3 | null = null;
   /** Which branch computeBounds took, and why — diagnostics. */
@@ -737,6 +956,7 @@ export class ViewerEngine {
       void this.reportSelection(modelIdMap);
     });
     highlighter.events.select.onClear.add(() => {
+      this.lastSelection = null;
       this.callbacks.onSelection?.(null);
     });
   }
@@ -753,8 +973,15 @@ export class ViewerEngine {
         batches.push(
           model.getItemsData([...localIds], {
             attributesDefault: true,
-            // Property sets are not in the default payload; ask for them.
-            relations: { IsDefinedBy: { attributes: true, relations: true } },
+            // Property sets, quantities and type properties are not in the
+            // default payload; ask for them. IsDefinedBy covers psets +
+            // quantities (IfcElementQuantity), IsTypedBy covers the IfcType's
+            // own sets, HasAssociations covers material layer sets.
+            relations: {
+              IsDefinedBy: { attributes: true, relations: true },
+              IsTypedBy: { attributes: true, relations: true },
+              HasAssociations: { attributes: true, relations: true },
+            },
             relationsDefault: { attributes: false, relations: false },
           }),
         );
@@ -766,15 +993,21 @@ export class ViewerEngine {
       const localId = unwrap(item._localId);
       const roomId = typeof localId === "number" ? this.elementToRoom.get(localId) : undefined;
 
-      this.callbacks.onSelection?.({
+      const { sets, typeName } = findAllPropertySets(item);
+      const selection: Selection = {
         localId: typeof localId === "number" ? localId : -1,
         category: asString(item._category) ?? "",
         name: asString(item.Name),
         guid: asString(item._guid),
         room: roomId == null ? null : (this.roomNames.get(roomId) ?? `#${roomId}`),
         circuit: findCircuitPset(item),
+        propertySets: sets,
+        materialLayers: findMaterialLayers(item),
+        typeName,
         attributes: collectAttributes(item),
-      });
+      };
+      this.lastSelection = selection;
+      this.callbacks.onSelection?.(selection);
     } catch (err) {
       this.callbacks.onError?.(err instanceof Error ? err.message : String(err));
     }
@@ -940,6 +1173,18 @@ export class ViewerEngine {
       viewCubeMounted: this.viewCube !== null,
       sectionReady: this.sectionPlane !== null,
       sectionApplied: this.sectionPlane?.isApplied ?? false,
+      // Selection probe for the headless attribute-panel check: which
+      // element is selected and which sets the inspector can render.
+      selection: this.lastSelection
+        ? {
+            localId: this.lastSelection.localId,
+            guid: this.lastSelection.guid,
+            category: this.lastSelection.category,
+            propertySets: this.lastSelection.propertySets.map((s) => s.name),
+            materialLayers: this.lastSelection.materialLayers.length,
+            typeName: this.lastSelection.typeName,
+          }
+        : null,
       sectionPlane: this.sectionPlane
         ? {
             normal: [

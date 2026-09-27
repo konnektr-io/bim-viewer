@@ -49,6 +49,22 @@ export interface Room {
 /** Pset_ElectricalCircuit, keyed by its real property names. */
 export type CircuitPset = Record<string, string>;
 
+/** One property set / quantity set, as extracted from the fragments payload. */
+export interface PropertySet {
+  /** Real IFC set name, e.g. `Pset_ElectricalCircuit` or `Qto_WallBaseQuantities`. */
+  name: string;
+  /** `qto` for `Qto_*` sets, `type` for sets found under `RelatingType`, else `pset`. */
+  kind: "pset" | "qto" | "type";
+  /** Flattened `property name -> value`, in payload order. */
+  properties: Record<string, string>;
+}
+
+/** One material layer: material name plus thickness when the model carries it. */
+export interface MaterialLayer {
+  name: string;
+  thickness: string | null;
+}
+
 export interface Selection {
   localId: number;
   category: string;
@@ -56,6 +72,16 @@ export interface Selection {
   guid: string | null;
   room: string | null;
   circuit: CircuitPset | null;
+  /**
+   * Every property set on the occurrence AND on its type object, in payload
+   * order. `Pset_ElectricalCircuit` is also mirrored on `circuit` for the
+   * labelled rows.
+   */
+  propertySets: PropertySet[];
+  /** Material layers (IfcMaterialLayerSet), empty when the element has none. */
+  materialLayers: MaterialLayer[];
+  /** Name of the IfcType the element is defined by, when present. */
+  typeName: string | null;
   /**
    * Every scalar attribute the fragments payload carried, flattened to
    * `Name -> value`. Needed to inspect elements the viewer has no special
