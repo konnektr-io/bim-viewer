@@ -65,9 +65,10 @@ function propText(entry: Record<string, unknown>, ...keys: string[]): string | n
 /**
  * Flatten one `IfcPropertySet.HasProperties` entry to `name -> value`.
  *
- * Handles `IfcPropertySingleValue` (`NominalValue`), enumerated values and
- * bounded values (`UnitBasedValue`). Entries without a name or without any
- * readable value are skipped so empty rows never reach the panel.
+ * Handles `IfcPropertySingleValue` (`NominalValue`), enumerated values
+ * (`EnumerationValues`), list values (`ListValues`) and bounded values
+ * (`LowerBoundValue` / `UpperBoundValue`). Entries without a name or without
+ * any readable value are skipped so empty rows never reach the panel.
  */
 function readPsetEntry(entry: unknown): [string, string] | null {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
@@ -79,11 +80,12 @@ function readPsetEntry(entry: unknown): [string, string] | null {
     "NominalValue",
     "UnitBasedValue",
     "EnumerationValues",
+    "ListValues",
     "LowerBoundValue",
     "UpperBoundValue",
   );
   if (value === null) return null;
-  return [key, value];
+  return [key, tidyValue(value)];
 }
 
 /**
@@ -108,212 +110,249 @@ function readQuantityEntry(entry: unknown): [string, string] | null {
     "NominalValue",
   );
   if (value === null) return null;
-  return [key, value];
+  return [key, tidyValue(value)];
 }
 
 /**
- * Find every property set in an item payload, WITHOUT recursing forever.
+ * Unwrap a payload value and return it as an array.
  *
- * Property sets arrive nested under `IsDefinedBy -> IfcRelDefinesByProperties
- * -> RelatingPropertyDefinition` (IFC4X3; IFC4 called the link
- * `RelatedPropertySet`) rather than as a flat record, and type-object
- * properties arrive under `IsTypedBy -> IfcRelDefinesByType -> RelatingType`,
- * so the object graph has to be walked. It must be walked ITERATIVELY:
- * requesting `relations: { IsDefinedBy: { relations: true } }` pulls in the
- * whole relation graph, and IFC relations are CYCLIC (IfcRelAggregates.Nests
- * points at IsDecomposedBy, which points back at Nests). The original
- * recursive version therefore blew the stack on every click with
- * "Maximum call stack size exceeded".
- *
- * Sets found anywhere under a `RelatingType` key are tagged `kind: "type"`;
- * `Qto_*` sets are tagged `"qto"`. Duplicates from cyclic paths are merged by
- * name so each set renders once.
+ * Aggregates arrive either as a plain array or wrapped as `{value: […]}`,
+ * depending on the path they were reached through, so both are accepted.
  */
-function findAllPropertySets(root: unknown): { sets: PropertySet[]; typeName: string | null } {
-  const seen = new WeakSet<object>();
-  const stack: Array<{ node: unknown; depth: number; inType: boolean }> = [
-    { node: root, depth: 0, inType: false },
-  ];
-  const MAX_DEPTH = 14;
-  let budget = 50_000;
+function asArray(value: unknown): unknown[] {
+  const v = unwrap(value);
+  return Array.isArray(v) ? v : [];
+}
+
+/** A payload value as a plain object, or null when it is a scalar or array. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  const v = unwrap(value);
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+/** A payload node's `_category`, upper-cased (`IFCPROPERTYSET`), or "". */
+function nodeCategory(node: Record<string, unknown>): string {
+  return (asString(node._category) ?? "").toUpperCase();
+}
+
+/** A payload node's `_localId` as a number, or null. */
+function nodeLocalId(node: Record<string, unknown>): number | null {
+  const id = unwrap(node._localId);
+  return typeof id === "number" ? id : null;
+}
+
+/**
+ * Trim the trailing float noise IFC measures carry.
+ *
+ * `Length = 3118.726962500003` and `ThermalTransmittance = 17.88888888888889`
+ * are unreadable in a narrow column, and nothing in this panel needs 15
+ * decimals. Four SIGNIFICANT figures, not four decimal places: a cross-section
+ * area of 0.0063608 m² must not collapse to 0.0064. Only plain numeric values
+ * are touched — ids, guids and labels are strings and pass through untouched.
+ */
+function tidyValue(text: string): string {
+  if (!/^-?\d+\.\d+$/.test(text)) return text;
+  const value = Number.parseFloat(text);
+  if (!Number.isFinite(value)) return text;
+  const trimmed = Math.abs(value) >= 1 ? value.toFixed(4) : value.toPrecision(4);
+  return String(Number(trimmed));
+}
+
+/** One property set as read off a payload node, before merging. */
+interface RawSet {
+  name: string;
+  kind: PropertySet["kind"];
+  localId: number | null;
+  properties: Record<string, string>;
+}
+
+/**
+ * Read one property-set node (`IfcPropertySet` or `IfcElementQuantity`).
+ *
+ * A node reached through the element's relations carries `HasProperties` (a
+ * property set) or `Quantities` (a quantity set). Its `Name` is WRAPPED
+ * (`{value: "Pset_…", type: "IFCLABEL"}`): comparing that to a raw string is
+ * exactly the bug that made the panel render no sets at all.
+ */
+function readSetNode(node: Record<string, unknown>): RawSet | null {
+  const name = asString(node.Name);
+  if (!name) return null;
+  const isQuantity = nodeCategory(node) === "IFCELEMENTQUANTITY" || name.startsWith("Qto_");
+  const properties: Record<string, string> = {};
+  for (const entry of asArray(isQuantity ? node.Quantities : node.HasProperties)) {
+    const pair = isQuantity ? readQuantityEntry(entry) : readPsetEntry(entry);
+    if (pair) properties[pair[0]] = pair[1];
+  }
+  return {
+    name,
+    kind: isQuantity ? "qto" : "pset",
+    localId: nodeLocalId(node),
+    properties,
+  };
+}
+
+/**
+ * Every property set and quantity set on an element, plus its type object.
+ *
+ * Measured on this model (13 493 elements, IFC4X3 Revit export), because none
+ * of this is guessable from the API:
+ *
+ * - the sets hang off the element's `IsDefinedBy`, and the traversal
+ *   (`IsDefinedBy: { attributes: true, relations: true }`) is what brings their
+ *   `HasProperties` / `Quantities` along. Fetching a set by its own localId
+ *   returns a NAME-ONLY stub unless relations are requested for it;
+ * - the element's type object arrives as one more `IsDefinedBy` entry
+ *   (`_category: "IFCPIPESEGMENTTYPE"`); `IsTypedBy` does not exist as a
+ *   relation tag in this model at all;
+ * - a type's own sets hang off its `HasPropertySets` attribute and arrive as
+ *   stubs, so they are fetched by id afterwards;
+ * - `DefinesOccurrence` and `ObjectTypeOf` point back at every SIBLING element,
+ *   so the paths are read explicitly instead of walking the graph. A blind walk
+ *   drags other elements' property sets in and merges their values into this
+ *   one — 57 pipes share one `IfcPipeSegmentType`.
+ */
+async function collectPropertySets(
+  model: FragmentsModel,
+  item: ItemData,
+): Promise<{ sets: PropertySet[]; typeName: string | null }> {
   const merged = new Map<string, PropertySet>();
   const order: string[] = [];
+  const stubs: number[] = [];
+  const typeSets: RawSet[] = [];
   let typeName: string | null = null;
 
-  const addSet = (name: string, kind: PropertySet["kind"], props: Record<string, string>): void => {
-    const key = `${kind}#${name}`;
-    const existing = merged.get(key);
+  // Keyed by set name: Revit attaches the same `Pset_*TypeCommon` entity to both
+  // the type and the occurrence, and that must render as ONE group. The kind is
+  // whichever path reached it FIRST — the element's own sets are recorded before
+  // the type's, so `(type)` really means "only the type object carries this".
+  const record = (set: RawSet, kindOverride?: PropertySet["kind"]): void => {
+    const existing = merged.get(set.name);
     if (existing) {
-      for (const [k, v] of Object.entries(props)) {
-        if (!(k in existing.properties)) existing.properties[k] = v;
+      for (const [key, value] of Object.entries(set.properties)) {
+        if (!(key in existing.properties)) existing.properties[key] = value;
       }
+      if (existing.localId === null && set.localId !== null) existing.localId = set.localId;
       return;
     }
-    merged.set(key, { name, kind, properties: { ...props } });
-    order.push(key);
+    merged.set(set.name, {
+      name: set.name,
+      kind: kindOverride ?? set.kind,
+      localId: set.localId,
+      properties: { ...set.properties },
+    });
+    order.push(set.name);
   };
 
-  while (stack.length > 0 && budget-- > 0) {
-    const { node, depth, inType } = stack.pop()!;
-    if (!node || typeof node !== "object") continue;
-    if (seen.has(node)) continue;
-    seen.add(node);
-    if (depth > MAX_DEPTH) continue;
+  for (const node of asArray((item as Record<string, unknown>).IsDefinedBy)) {
+    const rec = asRecord(node);
+    if (!rec) continue;
+    const category = nodeCategory(rec);
 
-    if (Array.isArray(node)) {
-      for (const child of node) stack.push({ node: child, depth: depth + 1, inType });
+    if (category.endsWith("TYPE")) {
+      if (typeName === null) typeName = asString(rec.Name);
+      for (const sub of asArray(rec.HasPropertySets)) {
+        const subRec = asRecord(sub);
+        if (!subRec) continue;
+        const set = readSetNode(subRec);
+        if (!set) continue;
+        if (Object.keys(set.properties).length === 0 && set.localId !== null) stubs.push(set.localId);
+        typeSets.push(set);
+      }
       continue;
     }
 
-    const record = node as Record<string, unknown>;
-
-    // Any object with a set name + HasProperties is a property set, wherever
-    // it sits in the graph (occurrence IsDefinedBy, or type RelatingType).
-    if (typeof record.Name === "string" && Array.isArray(record.HasProperties)) {
-      const setName = unwrap(record.Name);
-      if (typeof setName === "string" && setName !== "") {
-        const props: Record<string, string> = {};
-        for (const entry of record.HasProperties as unknown[]) {
-          const pair = readPsetEntry(entry);
-          if (pair) props[pair[0]] = pair[1];
-        }
-        if (Object.keys(props).length > 0) {
-          const kind: PropertySet["kind"] = inType
-            ? "type"
-            : setName.startsWith("Qto_")
-              ? "qto"
-              : "pset";
-          addSet(setName, kind, props);
-        }
-      }
-    }
-
-    // IfcElementQuantity carries Quantities instead of HasProperties.
-    if (typeof record.Name === "string" && Array.isArray(record.Quantities)) {
-      const setName = unwrap(record.Name);
-      if (typeof setName === "string" && setName !== "") {
-        const props: Record<string, string> = {};
-        for (const entry of record.Quantities as unknown[]) {
-          const pair = readQuantityEntry(entry);
-          if (pair) props[pair[0]] = pair[1];
-        }
-        if (Object.keys(props).length > 0) {
-          addSet(setName, inType ? "type" : "qto", props);
-        }
-      }
-    }
-
-    for (const [key, value] of Object.entries(record)) {
-      // Everything nested under a RelatingType link belongs to the TYPE
-      // object, not the occurrence — that is where the interesting defaults
-      // live. IFC4X3 links psets via RelatingPropertyDefinition; accept the
-      // IFC4 RelatedPropertySet shape too so both schemas walk.
-      const childInType = inType || key === "RelatingType";
-      if (key === "RelatingType" && value && typeof value === "object" && !Array.isArray(value)) {
-        const typeRec = value as Record<string, unknown>;
-        const name = asString(typeRec.Name);
-        if (name && typeName === null) typeName = name;
-      }
-      stack.push({ node: value, depth: depth + 1, inType: childInType });
+    if (category === "IFCPROPERTYSET" || category === "IFCELEMENTQUANTITY") {
+      const set = readSetNode(rec);
+      if (!set) continue;
+      if (Object.keys(set.properties).length === 0 && set.localId !== null) stubs.push(set.localId);
+      record(set);
     }
   }
-  return { sets: order.map((k) => merged.get(k)!), typeName };
+
+  // The type's sets go in second, and only keep the `type` kind when nothing on
+  // the element itself already declared that set.
+  for (const set of typeSets) record(set, "type");
+
+  // Type-object sets arrived as stubs; fetch them so their values show too.
+  if (stubs.length > 0) {
+    try {
+      const extra = await model.getItemsData([...new Set(stubs)], {
+        attributesDefault: true,
+        relationsDefault: { attributes: true, relations: true },
+      });
+      for (const node of extra) {
+        const rec = asRecord(node);
+        if (!rec) continue;
+        const set = readSetNode(rec);
+        if (set) record(set);
+      }
+    } catch (err) {
+      // A missing set is not worth failing the whole selection over.
+      console.warn("Could not load the type object's property sets", err);
+    }
+  }
+
+  return { sets: order.map((name) => merged.get(name)!), typeName };
+}
+
+/** `Pset_ElectricalCircuit`, for the hand-labelled rows at the top. */
+function findCircuitPset(sets: PropertySet[]): CircuitPset | null {
+  const found = sets.find((set) => set.name === "Pset_ElectricalCircuit");
+  return found ? { ...found.properties } : null;
 }
 
 /**
- * Find `Pset_ElectricalCircuit` in an item payload, WITHOUT recursing forever.
+ * Material layers from `HasAssociations` (`IfcMaterialLayerSet` ->
+ * `IfcMaterialLayer`).
  *
- * Thin wrapper over {@link findAllPropertySets} kept so the labelled circuit
- * rows keep working: the panel renders the full set list generically and uses
- * this only for the hand-labelled circuit block.
+ * The layer's own `Name` is the MATERIAL name (`BERSnl_21_baksteen_…`) and
+ * `LayerThickness` its thickness in the file's unit. `AssociatedTo` on the same
+ * node lists every element sharing that layer set (11 walls here), so it is
+ * deliberately not walked. A bare `IfcMaterial` or a profile set yields one
+ * entry without a thickness.
  */
-function findCircuitPset(root: unknown): CircuitPset | null {
-  const { sets } = findAllPropertySets(root);
-  const found = sets.find((s) => s.name === "Pset_ElectricalCircuit" && s.kind !== "type");
-  if (!found) {
-    const typed = sets.find((s) => s.name === "Pset_ElectricalCircuit");
-    return typed ? { ...typed.properties } : null;
-  }
-  return { ...found.properties };
-}
-
-/**
- * Find material layers (`IfcMaterialLayerSet -> IfcMaterialLayer`) in an item
- * payload, iteratively for the same cyclic-graph reason as the psets above.
- *
- * Returns one entry per layer with the material name and the layer thickness
- * when the model carries it. A directly-associated single material
- * (`IfcRelAssociatesMaterial -> RelatingMaterial.Name`) yields one entry with
- * a null thickness.
- */
-function findMaterialLayers(root: unknown): MaterialLayer[] {
-  const seen = new WeakSet<object>();
-  const stack: unknown[] = [root];
-  let budget = 20_000;
+function collectMaterialLayers(item: ItemData): { layers: MaterialLayer[]; setName: string | null } {
   const layers: MaterialLayer[] = [];
-  const singles: MaterialLayer[] = [];
+  const seen = new Set<string>();
+  let setName: string | null = null;
 
-  while (stack.length > 0 && budget-- > 0) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    if (seen.has(node)) continue;
-    seen.add(node);
+  const add = (name: string, thickness: string | null): void => {
+    const key = `${name}#${thickness ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    layers.push({ name, thickness });
+  };
 
-    if (Array.isArray(node)) {
-      for (const child of node) stack.push(child);
+  for (const node of asArray((item as Record<string, unknown>).HasAssociations)) {
+    const rec = asRecord(node);
+    if (!rec) continue;
+    const category = nodeCategory(rec);
+
+    if (category === "IFCMATERIALLAYERSET" || category === "IFCMATERIALLAYERSETUSAGE") {
+      setName = setName ?? asString(rec.LayerSetName) ?? asString(rec.Name);
+      // A usage wraps the set it points at; a plain set is the set.
+      const target = asRecord(rec.ForLayerSet) ?? rec;
+      for (const entry of asArray(target.MaterialLayers)) {
+        const layer = asRecord(entry);
+        if (!layer) continue;
+        const name = asString(layer.Name);
+        if (name) add(name, asString(layer.LayerThickness));
+      }
       continue;
     }
 
-    const record = node as Record<string, unknown>;
-
-    // A layer: thickness + a material reference with a name.
-    if ("LayerThickness" in record && "Material" in record) {
-      const thickness = asString(record.LayerThickness);
-      const material = record.Material as unknown;
-      const name =
-        material && typeof material === "object" && !Array.isArray(material)
-          ? asString((material as Record<string, unknown>).Name)
-          : null;
-      if (name) {
-        layers.push({ name, thickness });
-        continue;
-      }
-    }
-
-    // A directly-associated material arrives as IfcRelAssociatesMaterial ->
-    // RelatingMaterial. A layer set carries MaterialLayers; a single material
-    // carries just a Name.
-    if ("RelatingMaterial" in record && record.RelatingMaterial && typeof record.RelatingMaterial === "object") {
-      const mat = record.RelatingMaterial as Record<string, unknown>;
-      const name = asString(mat.Name);
-      if (name) {
-        // A layer set carries MaterialLayers; a single material does not.
-        if (Array.isArray(mat.MaterialLayers)) {
-          for (const entry of mat.MaterialLayers as unknown[]) stack.push(entry);
-        } else {
-          singles.push({ name, thickness: null });
-        }
-        continue;
-      }
-      stack.push(record.RelatingMaterial);
-      continue;
-    }
-
-    for (const value of Object.values(record)) {
-      stack.push(value);
+    if (
+      category === "IFCMATERIAL" ||
+      category === "IFCMATERIALPROFILESET" ||
+      category === "IFCMATERIALPROFILE"
+    ) {
+      const name = asString(rec.Name);
+      if (name) add(name, null);
     }
   }
 
-  // De-duplicate: the same layer set is reachable through several paths.
-  const seenKey = new Set<string>();
-  const out: MaterialLayer[] = [];
-  for (const entry of [...layers, ...singles]) {
-    const key = `${entry.name}#${entry.thickness ?? ""}`;
-    if (seenKey.has(key)) continue;
-    seenKey.add(key);
-    out.push(entry);
-  }
-  return out;
+  return { layers, setName };
 }
 
 /**
@@ -967,16 +1006,20 @@ export class ViewerEngine {
 
     try {
       const batches: Array<Promise<ItemData[]>> = [];
+      let target: FragmentsModel | null = null;
       for (const [modelId, localIds] of Object.entries(modelIdMap)) {
         const model = fragments.list.get(modelId);
         if (!model) continue;
+        target = target ?? model;
         batches.push(
           model.getItemsData([...localIds], {
             attributesDefault: true,
-            // Property sets, quantities and type properties are not in the
-            // default payload; ask for them. IsDefinedBy covers psets +
-            // quantities (IfcElementQuantity), IsTypedBy covers the IfcType's
-            // own sets, HasAssociations covers material layer sets.
+            // Property sets, quantities and material layers are NOT in the
+            // default payload: they arrive through relation traversal, and the
+            // traversal is also what brings a set's `HasProperties` along.
+            // `IsTypedBy` is listed for other models' benefit — this one links
+            // the type object through `IsDefinedBy` instead, and an unknown
+            // relation tag is harmless.
             relations: {
               IsDefinedBy: { attributes: true, relations: true },
               IsTypedBy: { attributes: true, relations: true },
@@ -988,21 +1031,24 @@ export class ViewerEngine {
       }
       const data = (await Promise.all(batches)).flat();
       const item = data[0];
-      if (!item) return;
+      if (!item || !target) return;
 
       const localId = unwrap(item._localId);
       const roomId = typeof localId === "number" ? this.elementToRoom.get(localId) : undefined;
 
-      const { sets, typeName } = findAllPropertySets(item);
+      const { sets, typeName } = await collectPropertySets(target, item);
+      const { layers, setName } = collectMaterialLayers(item);
+
       const selection: Selection = {
         localId: typeof localId === "number" ? localId : -1,
         category: asString(item._category) ?? "",
         name: asString(item.Name),
         guid: asString(item._guid),
         room: roomId == null ? null : (this.roomNames.get(roomId) ?? `#${roomId}`),
-        circuit: findCircuitPset(item),
+        circuit: findCircuitPset(sets),
         propertySets: sets,
-        materialLayers: findMaterialLayers(item),
+        materialLayers: layers,
+        materialLayerSetName: setName,
         typeName,
         attributes: collectAttributes(item),
       };
@@ -1184,8 +1230,13 @@ export class ViewerEngine {
             localId: this.lastSelection.localId,
             guid: this.lastSelection.guid,
             category: this.lastSelection.category,
-            propertySets: this.lastSelection.propertySets.map((s) => s.name),
+            propertySets: this.lastSelection.propertySets.map((s) => ({
+              name: s.name,
+              kind: s.kind,
+              properties: Object.keys(s.properties).length,
+            })),
             materialLayers: this.lastSelection.materialLayers.length,
+            materialLayerSetName: this.lastSelection.materialLayerSetName,
             typeName: this.lastSelection.typeName,
           }
         : null,
