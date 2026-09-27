@@ -34,9 +34,39 @@ from `GET /api/model/{slug}`. Neither side hardcodes a filename.
   storey with 0 elements is shown rather than hidden.
 - **Frame all** and iso/front/back/left/right/top/bottom view presets.
 - **Picking** via `Highlighter`: click an element for its category, name,
-  `GlobalId`, the `IfcSpace` room it sits in, and its
-  `Pset_ElectricalCircuit` values.
+  `GlobalId`, the `IfcSpace` room it sits in, and its full **attribute
+  inspector** — every `IfcPropertySet` and `IfcElementQuantity` on the element
+  (and on its type object) as its own collapsible group, material layer sets,
+  a filter box over names and values, and copy buttons for `localId` /
+  `GlobalId` / the whole pasteable block.
 - No settings panel, no accounts.
+
+### Reading the Fragments payload (measured, not documented)
+
+The converted model does not hand you property sets the way the API surface
+suggests. These were all measured against the live 13 493-element model:
+
+- A set node's `Name` is **wrapped** (`{value: "Pset_…", type: "IFCLABEL"}`).
+  Comparing it to a raw string matches nothing and the panel comes up empty.
+- Sets arrive through relation traversal: request
+  `relations: { IsDefinedBy: { attributes: true, relations: true } }`, which is
+  what brings each set's `HasProperties` / `Quantities` along. Fetching a set by
+  its own `_localId` returns a **name-only stub** unless relations are asked for.
+- The element's **type object** arrives as one more `IsDefinedBy` entry
+  (`_category: "IFCPIPESEGMENTTYPE"`). `IsTypedBy` does not exist as a relation
+  tag in this model. A type's own sets hang off its `HasPropertySets` and need a
+  follow-up `getItemsData` call.
+- **Material layer sets** arrive under `HasAssociations` as
+  `IFCMATERIALLAYERSET`, where the *layer's* `Name` is the material name and
+  `LayerThickness` the thickness in the file's unit.
+- `DefinesOccurrence` and `ObjectTypeOf` fan out to every **sibling** element
+  (57 pipes share one `IfcPipeSegmentType`, 11 walls one layer set), so read the
+  paths explicitly instead of walking the graph — a blind walk merges other
+  elements' values into the selected one.
+- **Diameters are not a property.** Revit's `Pset_PipeSegmentTypeCommon` here
+  carries only `Reference` and `Length`; a pipe's diameter lives in the extruded
+  profile, so the nearest data are the `Qto_*BaseQuantities` (a
+  `GrossCrossSectionArea` of 0.006361 m² implies Ø90 mm).
 
 ## Layout
 
