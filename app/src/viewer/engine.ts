@@ -1030,9 +1030,29 @@ export class ViewerEngine {
     const children = new Set(this.storeyElements.get(localId) ?? []);
     const hidden = this.allIds.filter((id) => !children.has(id));
     await model.setVisible(hidden, false);
-    // Re-frame on the storey: isolating a floor is pointless if the camera
-    // stays where the whole model was framed from.
-    await this.fitCamera(children.size ? [...children] : undefined);
+    // Deliberately NO camera move.
+    //
+    // Re-framing on the storey was wrong, and it cannot be fixed from outside
+    // the library. Fragments hides an element by OMITTING it from the draw
+    // call, not by setting three.js visibility: measured with a storey
+    // isolated, `model.visibleItems` still reports 256 ids and all 121 meshes
+    // still have `visible === true`, while the triangle count correctly drops
+    // (200,220 -> 157,309). So there is no "visible mesh" subset in the scene
+    // graph to measure and aim at.
+    //
+    // Every route that does return a box is wrong on this model:
+    // - getBoxes()/getMergedBox(): element 144267, a 0.8 m kitchen hob, makes
+    //   web-ifc emit 225.3 x 546.6 x 221.3 m of geometry (IfcOpenShell does not
+    //   reproduce it, so it is a web-ifc bug, not bad model data);
+    // - getItemsGeometry(ids): its per-mesh `transform` has a nonsense diagonal
+    //   ([-0.749, 0, 0]) and puts the storey 217 m from where it renders
+    //   (centre x=+108.5 vs the true x=-110);
+    // - getPositions(): 798 vertices for 13,493 elements.
+    //
+    // A camera pointed at empty space is worse than one left alone, so the
+    // filter now only filters. Use the SECTION to aim at a floor: it works, and
+    // it is the control that can express "above" and "below" as well.
+    await this.fragments?.core.update(true);
     return { visible: children.size, total: this.allIds.length };
   }
 
@@ -1092,22 +1112,6 @@ export class ViewerEngine {
   /** Storey -> its element ids, for the headless diagnostics only. */
   get storeyElementsForDiag(): Record<number, number[]> {
     return Object.fromEntries(this.storeyElements);
-  }
-
-  /** Per-element size, for the headless diagnostics only. */
-  async __boundsFor(localIds: number[]): Promise<{ size: [number, number, number]; span: number } | null> {
-    const box = await this.boundsFromGeometry(localIds);
-    if (box.isEmpty()) return null;
-    const size = box.getSize(new THREE.Vector3());
-    return {
-      size: [size.x, size.y, size.z] as [number, number, number],
-      span: size.length(),
-    };
-  }
-
-  /** The live three.js camera, for the headless diagnostics only. */
-  get __camera(): THREE.PerspectiveCamera | null {
-    return (this.world?.camera.three as THREE.PerspectiveCamera) ?? null;
   }
 
   /** Display title for the model, from the backend config. */
