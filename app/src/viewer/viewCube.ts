@@ -69,7 +69,12 @@ export class ViewCube {
     this.element = document.createElement("div");
     this.element.style.cssText = [
       "position:absolute",
-      "right:3rem", // clear of the right-hand panel, which is ~24rem wide
+      // The right-hand panel is w-96 (24rem) and sits at right-3, so the cube
+      // has to clear 24rem + a gap or it renders underneath it. Anchoring to the
+      // viewport's right EDGE and translating back by that width is fragile, so
+      // place it relative to the container and let the panel sit above it in
+      // z-order only if they ever do overlap.
+      "right:calc(24rem + 1.75rem)",
       "top:3rem",
       "z-index:5",
       `width:${this.size}px`,
@@ -78,6 +83,8 @@ export class ViewCube {
       "user-select:none",
       "touch-action:none",
       "opacity:0.92",
+      "border-radius:8px",
+      "background:rgba(11,17,29,0.55)",
     ].join(";");
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
