@@ -25,6 +25,19 @@ export function ViewerCanvas() {
       onError: (message) => useViewerStore.getState().setError(message),
     });
 
+    // The title comes from the backend config, not from a constant here.
+    void fetch("/api/config")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((cfg: { modelTitle?: string } | null) => {
+        if (cfg?.modelTitle) useViewerStore.getState().setModelTitle(cfg.modelTitle);
+        document.title = cfg?.modelTitle
+          ? `${cfg.modelTitle} — BIM viewer`
+          : "BIM viewer";
+      })
+      .catch(() => {
+        /* the header falls back to the default; not worth surfacing */
+      });
+
     // Exposed so the storey buttons can drive visibility without prop-drilling
     // the engine through the tree.
     (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine = engine;

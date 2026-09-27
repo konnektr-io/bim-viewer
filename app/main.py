@@ -36,11 +36,19 @@ log = logging.getLogger("bim-viewer")
 HERE = Path(__file__).resolve().parent
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", HERE / "static"))
 
-# One model behind one route for now; a second format gets its own prefix.
-MODEL_KEY = os.environ.get("S3_MODEL_KEY", "model/Achterhekers57.ifc")
-MODEL_ROUTE = "/api/model/Achterhekers57.ifc"
-
+# The model is named entirely by configuration. Nothing about which building
+# this is — not the S3 key, not the URL, not the title — is baked into the
+# code, so the image is reusable for any project.
+#
+#   S3_MODEL_KEY   key in the bucket          (required)
+#   MODEL_SLUG     filename the client uses   (required)
+#   MODEL_TITLE    display name in the UI     (optional)
+#
+# The route is deliberately fixed at /api/model/{slug}: the slug comes from the
+# request path, so the browser never hardcodes a filename either.
 UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
+
+DEFAULT_TITLE = "BIM model"
 
 app = FastAPI(title="bim-viewer", docs_url=None, redoc_url=None)
 
@@ -152,12 +160,24 @@ def healthz() -> Response:
     return Response("ok", media_type="text/plain")
 
 
-@app.api_route(MODEL_ROUTE, methods=["GET", "HEAD"])
-async def stream_model(request: Request) -> Response:
+@app.get("/api/config")
+def client_config() -> dict[str, str]:
+    """What the SPA needs to know: the model slug to fetch and how to label it.
+
+    Served from configuration so the frontend contains no project name at all.
+    """
+    return {
+        "modelSlug": os.environ.get("MODEL_SLUG", "model.ifc"),
+        "modelTitle": os.environ.get("MODEL_TITLE", DEFAULT_TITLE),
+    }
+
+
+@app.api_route("/api/model/{slug}", methods=["GET", "HEAD"])
+async def stream_model(request: Request, slug: str) -> Response:
     """Stream the model from Garage straight through to the browser.
 
     Range and the ETag/Last-Modified validators are forwarded so the client can
-    revalidate a 17.7 MB download instead of pulling it again.
+    revalidate a large download instead of pulling it again.
     """
     try:
         config = get_s3()
@@ -165,10 +185,15 @@ async def stream_model(request: Request) -> Response:
         log.error("S3 not configured: %s", exc)
         raise HTTPException(status_code=503, detail="storage not configured") from exc
 
+    model_key = os.environ.get("S3_MODEL_KEY")
+    if not model_key:
+        log.error("S3_MODEL_KEY is not set")
+        raise HTTPException(status_code=503, detail="model not configured")
+
     method = "HEAD" if request.method == "HEAD" else "GET"
     byte_range = request.headers.get("range")
     signed = sign_get(
-        config, method=method, key=MODEL_KEY, now=dt.datetime.now(dt.timezone.utc), byte_range=byte_range
+        config, method=method, key=model_key, now=dt.datetime.now(dt.timezone.utc), byte_range=byte_range
     )
 
     # The client deliberately outlives this handler: StreamingResponse consumes

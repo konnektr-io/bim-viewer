@@ -34,6 +34,7 @@ function StatusLine() {
 
 export default function App() {
   const format = useViewerStore((s) => s.format);
+  const modelTitle = useViewerStore((s) => s.modelTitle);
   const isReady = useViewerStore((s) => s.status.state === "ready");
 
   return (
@@ -45,7 +46,7 @@ export default function App() {
       <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Achterhekers 57</CardTitle>
+            <CardTitle className="text-sm">{modelTitle}</CardTitle>
           </CardHeader>
           <CardContent>
             <StatusLine />

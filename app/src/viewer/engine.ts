@@ -22,11 +22,10 @@ import {
 } from "./types";
 import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
 import { CIRCUIT_LABELS } from "./labels";
+import type { ModelConfig } from "./types";
 
 export type { ViewPreset };
 
-const MODEL_URL = "/api/model/Achterhekers57.ifc";
-const MODEL_ID = "achterhekers57";
 const WASM_PATH = "/wasm/";
 
 /** The concrete world shape this engine builds. */
@@ -107,6 +106,8 @@ export class ViewerEngine {
   private storeyBoxForDiag: THREE.Box3 | null = null;
   /** Which branch computeBounds took, and why — diagnostics. */
   private boundsTrace: Record<string, unknown> = {};
+  /** Model slug + title, fetched from the backend so nothing is hardcoded here. */
+  private config: ModelConfig | null = null;
 
   // Plain field, not a constructor parameter property: `erasableSyntaxOnly`
   // (inherited from the graph-explorer tsconfig) forbids emit-only syntax.
@@ -196,8 +197,13 @@ export class ViewerEngine {
     const ifcLoader = components.get(OBC.IfcLoader);
     await ifcLoader.setup({ autoSetWasm: false, wasm: { path: WASM_PATH, absolute: true } });
 
+    this.callbacks.onProgress?.("Fetching model configuration…");
+    const configRes = await fetch("/api/config");
+    if (!configRes.ok) throw new Error(`Failed to fetch config: HTTP ${configRes.status}`);
+    this.config = (await configRes.json()) as ModelConfig;
+
     this.callbacks.onProgress?.("Fetching IFC…");
-    const response = await fetch(MODEL_URL);
+    const response = await fetch(`/api/model/${encodeURIComponent(this.config.modelSlug)}`);
     if (!response.ok) throw new Error(`Failed to fetch IFC: HTTP ${response.status}`);
 
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -207,10 +213,10 @@ export class ViewerEngine {
 
     // `coordinate: true` (the default, and the second argument here) applies the
     // coordination matrix, moving the model off its georeferenced site origin
-    // (x=-105235, y=-43940) into a local frame. With `false` the raw
-    // coordinates are kept and the building ends up ~690 units from the origin,
-    // which no amount of camera fitting can frame sensibly.
-    await ifcLoader.load(bytes, true, MODEL_ID, {
+    // into a local frame. With `false` the raw coordinates are kept and the
+    // building ends up hundreds of units from the origin, which no amount of
+    // camera fitting can frame sensibly.
+    await ifcLoader.load(bytes, true, this.config.modelSlug, {
       processData: {
         progressCallback: (progress) => {
           this.callbacks.onProgress?.(`Converting to Fragments… ${Math.round((progress ?? 0) * 100)}%`);
@@ -218,7 +224,7 @@ export class ViewerEngine {
       },
     });
 
-    const model = fragments.list.get(MODEL_ID);
+    const model = fragments.list.get(this.config.modelSlug);
     if (!model) throw new Error("Model not present in FragmentsManager");
     this.model = model;
   }
@@ -600,6 +606,11 @@ export class ViewerEngine {
   /** Storey -> its element ids, for the headless diagnostics only. */
   get storeyElementsForDiag(): Record<number, number[]> {
     return Object.fromEntries(this.storeyElements);
+  }
+
+  /** Display title for the model, from the backend config. */
+  get modelTitle(): string {
+    return this.config?.modelTitle ?? "BIM model";
   }
 
   /** Diagnostic surface for the headless verification run. */

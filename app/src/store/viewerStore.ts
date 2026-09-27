@@ -12,6 +12,7 @@ import type { ViewPreset } from "@/viewer/viewPresets";
 interface ViewerState {
   format: Format;
   status: LoadStatus;
+  modelTitle: string;
   storeys: Storey[];
   rooms: Room[];
   activeStorey: number | null;
@@ -21,6 +22,7 @@ interface ViewerState {
   totalCount: number | null;
 
   setFormat: (format: Format) => void;
+  setModelTitle: (title: string) => void;
   setLoading: (detail: string) => void;
   setReady: (info: {
     elementCount: number;
@@ -37,6 +39,7 @@ interface ViewerState {
 export const useViewerStore = create<ViewerState>((set) => ({
   format: "ifc",
   status: { state: "idle" },
+  modelTitle: "BIM model",
   storeys: [],
   rooms: [],
   activeStorey: null,
@@ -46,6 +49,8 @@ export const useViewerStore = create<ViewerState>((set) => ({
   totalCount: null,
 
   setFormat: (format) => set({ format, selection: null }),
+
+  setModelTitle: (modelTitle) => set({ modelTitle }),
 
   setLoading: (detail) => set({ status: { state: "loading", detail } }),
 

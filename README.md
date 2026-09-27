@@ -1,105 +1,124 @@
 # bim-viewer
 
-Browser IFC viewer for **Achterhekers 57** — <https://bim-viewer.local.raes.konnektr.io>
-(internal, home cluster).
+A browser BIM viewer. The model it serves — which building, from which bucket
+key, under what title — is **entirely configuration**; nothing about any
+particular project is compiled into the image or the frontend.
 
-Renders the real 17.7 MB IFC so the model can be checked in a browser. The point
-is the data a 3D view alone cannot show: **room names** and **which electrical
-circuit each light is on**.
+Deployed at <https://bim-viewer.local.raes.konnektr.io> (internal, home cluster).
+Manifests live in [`nikoraes/home-k8s`](https://github.com/nikoraes/home-k8s) under
+`bim-viewer/` and only reference this image by tag — the same split as kiseki:
+this repo builds the image, `home-k8s` deploys it.
 
-Stack: [ThatOpen `engine_components`](https://github.com/ThatOpen/engine_components)
-(`@thatopen/components` + `@thatopen/components-front`) on three.js + web-ifc.
+## Configuration
 
-> **Deployment is not in this repo.** The k8s manifests live in
-> [`nikoraes/home-k8s`](https://github.com/nikoraes/home-k8s) under
-> `bim-viewer/`, and they only reference this image by tag. Same split as
-> kiseki: this repo builds the image, `home-k8s` deploys it.
+Everything the app needs comes from the environment:
+
+| variable | required | meaning |
+|---|---|---|
+| `S3_ENDPOINT` | yes | e.g. `https://s3.local.raes.konnektr.io` |
+| `S3_BUCKET` | yes | bucket name |
+| `S3_REGION` | no | defaults to `us-east-1` |
+| `S3_ACCESS_KEY` | yes | from the `bim-hermes-s3` Secret |
+| `S3_SECRET_KEY` | yes | from the `bim-hermes-s3` Secret |
+| `S3_MODEL_KEY` | yes | key in the bucket, e.g. `model/whatever.ifc` |
+| `MODEL_SLUG` | no | filename the browser requests (default `model.ifc`) |
+| `MODEL_TITLE` | no | display title (default `BIM model`) |
+| `STATIC_DIR` | no | where the built SPA lives |
+
+The browser asks `GET /api/config` for the slug and title, then streams the model
+from `GET /api/model/{slug}`. Neither side hardcodes a filename.
 
 ## What it does
 
-- **Storey switcher** over the 7 `IfcBuildingStorey` (S_Funderingsplaat,
-  A_Kelder, Maaiveld, S_Gelijkvloers, A_Gelijkvloers Vloer, A_Verdieping +1,
-  A_Verdieping +2), plus "Alles". A storey with 0 elements is shown, not hidden.
+- **Storey switcher** over the `IfcBuildingStorey` entities, plus "All". A
+  storey with 0 elements is shown rather than hidden.
+- **Frame all** and iso/front/back/left/right/top/bottom view presets.
 - **Picking** via `Highlighter`: click an element for its category, name,
   `GlobalId`, the `IfcSpace` room it sits in, and its
   `Pset_ElectricalCircuit` values.
-- No settings panel, no accounts, no knobs.
+- No settings panel, no accounts.
 
 ## Layout
 
 ```
 app/
-├── main.py            FastAPI: serves the SPA + proxies the IFC from Garage
+├── main.py            FastAPI: serves the SPA + streams the model from S3
 ├── index.html         Vite entry
 ├── src/
 │   ├── main.tsx       React root
-│   ├── App.tsx        layout, status line
-│   ├── components/    FormatTabs · StoreyList · SelectionDetail · UsdPlaceholder
+│   ├── App.tsx        layout + status line
+│   ├── components/    FormatTabs · ViewControls · StoreyList · SelectionDetail
+│   │                  · UsdPlaceholder · ViewerCanvas
 │   ├── components/ui/ shadcn primitives (from graph-explorer)
 │   ├── viewer/
 │   │   ├── engine.ts  the imperative ThatOpen world (not a React component)
-│   │   ├── types.ts   payload shapes + unwrap()
-│   │   └── labels.ts  Pset_ElectricalCircuit display labels
+│   │   ├── viewPresets.ts
+│   │   ├── labels.ts  Pset_ElectricalCircuit display labels
+│   │   └── types.ts
 │   ├── store/         zustand bridge
-│   └── index.css      design tokens (copied from graph-explorer)
-└── public/wasm/       web-ifc 0.0.77, vendored
+│   └── index.css      design tokens (from graph-explorer)
+└── public/wasm/       web-ifc, vendored
 ```
 
 The engine is deliberately **not** a React component: `Components.init()` owns a
 render loop and the scene is a long-lived mutable object, so React owns the UI
 and the engine owns the scene, bridged by zustand.
 
-## The model
-
-`bim` bucket, key `model/Achterhekers57.ifc` — **17,670,343 bytes**, the single
-authored working file. The backend reads credentials from the `bim-hermes-s3`
-Secret at runtime and signs S3 requests itself, so the key never reaches the
-browser and no CORS or signed-URL flow is needed.
-
-## Version pins that matter
-
-| package | pin | why |
-|---|---|---|
-| `web-ifc` | **0.0.77** | 0.0.78's JS calls `StreamMeshes` with 4 args while its wasm accepts 3; every load dies with `function StreamMeshes called with 4 arguments, expected 3`. Not fixable by changing the Fragments worker. |
-| `@thatopen/fragments` | `3.4.7` | `FragmentsManager.getWorker()` resolves the matching worker build. |
-
 ## Local development
 
 ```bash
 cd app
 npm ci
-npm run build        # tsc -b && vite build
+npm run build          # tsc -b && vite build
 
-# in another shell, for the API + S3 proxy
-cd app && STATIC_DIR=../app/dist \
-  S3_ENDPOINT=https://s3.local.raes.konnektr.io S3_BUCKET=bim \
-  S3_REGION=us-east-1 S3_ACCESS_KEY=… S3_SECRET_KEY=… \
+cd app && STATIC_DIR=./dist \
+  S3_ENDPOINT=… S3_BUCKET=… S3_ACCESS_KEY=… S3_SECRET_KEY=… \
+  S3_MODEL_KEY=… MODEL_SLUG=… MODEL_TITLE=… \
   uvicorn main:app --port 8080
 ```
-
-`npm run dev` starts Vite with `/api` proxied to `127.0.0.1:8080`.
 
 ## CI
 
 `.github/workflows/build-image.yml` runs `tsc -b && vite build` plus a backend
-import check, then builds and pushes to `ghcr.io/konnektr-io/bim-viewer` with
+import check, then builds and pushes to `ghcr.io/konnektr-io/bim-viewer` using
 `GITHUB_TOKEN`. Tags follow the kiseki convention (`v1.2.3`, `v1.2`, `v1`,
 `latest` on the default branch).
 
-The ghcr package is **public**, so the cluster pulls it without a pull secret.
+## Notes for whoever extends this
+
+**web-ifc must stay on 0.0.77.** 0.0.78's JS calls `StreamMeshes` with four
+arguments while its wasm accepts three, so every load dies with
+`function StreamMeshes called with 4 arguments, expected 3`. The stack trace
+points at the Fragments worker and is misleading; changing the worker does not
+help.
+
+**Storeys and rooms must come from `getItemsOfCategories`.**
+`getSpatialStructure()` stops at the storey level behind a chain of
+null-category aggregation nodes, so matching on category finds nothing at all —
+silently, with no error.
+
+**The box APIs on `FragmentsModel` cannot be trusted for framing.** On a model
+with one broken element (`ARC_573_Round transition_angle`, a duct fitting
+spanning 47 m), `getBoxes()`, `getMergedBox(storeyIds)` and
+`getMergedBox(storeyChildren)` all returned 280 × 546 × 281 while IfcOpenShell
+measured the building at ~26 × 49 × 9 m. `computeBounds` therefore derives the
+extent from element **centres**, which cluster correctly. Re-measure once the
+model is re-exported without the bad element.
+
+**Never pass an `oklch()` string to `THREE.Color`.** three.js cannot parse that
+colour model, logs "Unknown color model" and silently leaves the value unset.
+Convert the theme token to a hex literal.
 
 ## Known gaps
 
-- **USD is a placeholder tab.** The house USD is a reference-only `subLayers`
+- **USD is a placeholder tab.** The scene USD is a reference-only `subLayers`
   composition, and three.js `USDLoader` follows neither `subLayers` nor
   `references` (0 hits in the loader source), so it cannot render it. It needs
   a flattening step: compose the stack into one self-contained `.usd`, rewrite
-  the absolute `/opt/data/cad/…` paths to proxy-relative URLs, and scale
-  mm → m. `garden.usda` and `hifi_assets.usda` are also deliberate empty
-  placeholders, so the current scene is shell + bathroom.
+  the absolute paths to proxy-relative URLs, and scale mm → m.
 - **Runtime CDN dependencies** remain: the Fragments worker (unpkg) and
   `opentype.js` (jsdelivr). Both are reachable from the cluster, but vendoring
   them would remove the dependency.
 - The IFC → Fragments conversion runs **client-side**, so a cold first load
-  downloads 17.7 MB and then converts. Pre-converting to `.frag` would fix that
-  at the cost of regenerating on every IFC edit.
+  downloads the whole model and then converts. Pre-converting to `.frag` would
+  fix that at the cost of regenerating on every IFC edit.

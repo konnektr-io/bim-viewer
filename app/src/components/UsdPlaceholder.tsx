@@ -26,8 +26,8 @@ export function UsdPlaceholder() {
           </p>
           <ul className="list-disc space-y-1 pl-5">
             <li>
-              <code className="font-mono text-xs">achterhekers57.usd</code> is 910 bytes and
-              contains only <code className="font-mono text-xs">subLayers</code> — no geometry.
+              The scene entry point is 910 bytes and contains only{" "}
+              <code className="font-mono text-xs">subLayers</code> — no geometry.
             </li>
             <li>
               It references absolute local paths{" "}
@@ -35,7 +35,7 @@ export function UsdPlaceholder() {
               browser.
             </li>
             <li>
-              The real geometry lives in the leaf{" "}
+              The real geometry lives in the leaf layer{" "}
               <code className="font-mono text-xs">house_noinst.usda</code> (52.5 MB,{" "}
               <code className="font-mono text-xs">metersPerUnit = 0.001</code>, 55 Mesh prims).
             </li>

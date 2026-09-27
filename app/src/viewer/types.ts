@@ -65,3 +65,11 @@ export type LoadStatus =
   | { state: "error"; message: string };
 
 export type Format = "ifc" | "usd";
+
+/** Served by the backend from its own configuration, so no project name is in the frontend. */
+export interface ModelConfig {
+  /** Filename to fetch from /api/model/{slug} */
+  modelSlug: string;
+  /** Display name for the header */
+  modelTitle: string;
+}
