@@ -1,0 +1,43 @@
+/**
+ * Mounts the ThatOpen engine into a plain div and keeps React out of its way.
+ *
+ * The engine owns a render loop; React only receives status callbacks. The
+ * component unmounts the engine with the div, and never re-creates it for a
+ * state change.
+ */
+import { useEffect, useRef } from "react";
+
+import { useViewerStore } from "@/store/viewerStore";
+import { ViewerEngine } from "@/viewer/engine";
+
+export function ViewerCanvas() {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const store = useViewerStore.getState();
+    const engine = new ViewerEngine({
+      onProgress: (detail) => useViewerStore.getState().setLoading(detail),
+      onReady: (info) => useViewerStore.getState().setReady(info),
+      onSelection: (selection) => useViewerStore.getState().setSelection(selection),
+      onError: (message) => useViewerStore.getState().setError(message),
+    });
+
+    // Exposed so the storey buttons can drive visibility without prop-drilling
+    // the engine through the tree.
+    (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine = engine;
+
+    engine.load(container).catch((err) => {
+      store.setError(err instanceof Error ? err.message : String(err));
+    });
+
+    return () => {
+      engine.dispose();
+      delete (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine;
+    };
+  }, []);
+
+  return <div ref={containerRef} className="absolute inset-0" style={{ visibility: "hidden" }} />;
+}
