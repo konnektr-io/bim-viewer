@@ -10,10 +10,12 @@ name: Build and Push Image
 on:
   pull_request:
     branches: [main]
+  # Tag-push trigger only (the kiseki convention). `gh release create` creates
+  # the tag, so a release fires this — but do NOT also add
+  # `release: types: [published]`: both events match one release and CI then
+  # builds and pushes the same image twice under the same tags.
   push:
     tags: ["v*"]
-  release:
-    types: [published]
   workflow_dispatch:
 
 env:
@@ -97,6 +99,13 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          # `push: true` is REQUIRED here, not implied by the job-level `if`
+          # above. The job gate stops a PR from running at all, but
+          # build-push-action defaults to `push: false` and then only writes
+          # the result to the build cache — the job goes green and publishes
+          # NOTHING ("No output specified with docker-container driver"). A
+          # release whose image never lands looks exactly like a healthy run.
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
