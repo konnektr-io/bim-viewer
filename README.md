@@ -81,8 +81,26 @@ cd app && STATIC_DIR=./dist \
 
 `.github/workflows/build-image.yml` runs `tsc -b && vite build` plus a backend
 import check, then builds and pushes to `ghcr.io/konnektr-io/bim-viewer` using
-`GITHUB_TOKEN`. Tags follow the kiseki convention (`v1.2.3`, `v1.2`, `v1`,
-`latest` on the default branch).
+`GITHUB_TOKEN`.
+
+**Tests run on every PR; the image is built on release only.** A PR must never
+publish an artefact, and the image tag is the version — `home-k8s` pins an
+explicit tag (`ghcr.io/konnektr-io/bim-viewer:v0.1.0`), so building on every
+main push only moved a `latest` that CI was shipping underneath a running
+deployment. Release a version to build it:
+
+```bash
+gh release create v0.1.1 --repo konnektr-io/bim-viewer --target main \
+  --title "v0.1.1" --notes-file /tmp/notes.md
+```
+
+`gh release create` creates the tag, and that tag push is what triggers the
+build. Tags follow the kiseki convention with the `v` prefix kept:
+`v1.2.3`, `v1.2`, `v1`. There is deliberately no `latest` — with release-only
+builds it would sit frozen and read as current.
+
+`package.json` is `"private": true` and its version is not the release, so there
+is nothing to bump: the git tag is the version.
 
 ## Notes for whoever extends this
 
