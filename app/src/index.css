@@ -1,6 +1,14 @@
-/* Fonts must be the FIRST rule: CSS requires @import to precede all rules
-   except @charset/@layer, and a later one is dropped by the optimiser. */
-@import url("https://fonts.bunny.net/css?family=plus-jakarta-sans:400,500,600,700&family=jetbrains-mono:400,500&display=swap");
+/* Fonts must be the FIRST rules: CSS requires @import to precede all rules
+   except @charset/@layer, and a later one is dropped by the optimiser.
+
+   One @import PER FAMILY. fonts.bunny.net honours only the first `family=`
+   parameter and silently discards the rest, answering 200 with just that one
+   family — so a combined URL loads Plus Jakarta Sans and leaves JetBrains Mono
+   undefined. The browser then reports document.fonts.check() === true (the
+   family "exists" via the generic monospace fallback) while the text renders
+   in Times. Request each family separately. */
+@import url("https://fonts.bunny.net/css?family=plus-jakarta-sans:400,500,600,700&display=swap");
+@import url("https://fonts.bunny.net/css?family=jetbrains-mono:400,500&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 
