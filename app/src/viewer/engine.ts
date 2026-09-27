@@ -861,6 +861,22 @@ export class ViewerEngine {
     return Object.fromEntries(this.storeyElements);
   }
 
+  /** Per-element size, for the headless diagnostics only. */
+  async __boundsFor(localIds: number[]): Promise<{ size: [number, number, number]; span: number } | null> {
+    const box = await this.boundsFromGeometry(localIds);
+    if (box.isEmpty()) return null;
+    const size = box.getSize(new THREE.Vector3());
+    return {
+      size: [size.x, size.y, size.z] as [number, number, number],
+      span: size.length(),
+    };
+  }
+
+  /** The live three.js camera, for the headless diagnostics only. */
+  get __camera(): THREE.PerspectiveCamera | null {
+    return (this.world?.camera.three as THREE.PerspectiveCamera) ?? null;
+  }
+
   /** Display title for the model, from the backend config. */
   get modelTitle(): string {
     return this.config?.modelTitle ?? "BIM model";
