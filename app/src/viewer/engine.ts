@@ -49,34 +49,50 @@ const asString = (value: unknown): string | null => {
 };
 
 /**
- * Find `Pset_ElectricalCircuit` anywhere in an item payload.
+ * Find `Pset_ElectricalCircuit` in an item payload, WITHOUT recursing forever.
  *
- * Property sets arrive nested under IsDefinedBy -> IfcRelDefinesByProperties,
- * not as a flat record, so this walks the object graph.
+ * Property sets arrive nested under IsDefinedBy -> IfcRelDefinesByProperties
+ * rather than as a flat record, so the object graph has to be walked. It must
+ * be walked ITERATIVELY: requesting
+ * `relations: { IsDefinedBy: { relations: true } }` pulls in the whole relation
+ * graph, and IFC relations are CYCLIC (IfcRelAggregates.Nests points at
+ * IsDecomposedBy, which points back at Nests). The original recursive version
+ * therefore blew the stack on every click with
+ * "Maximum call stack size exceeded".
  */
 function findCircuitPset(root: unknown): CircuitPset | null {
-  if (!root || typeof root !== "object") return null;
-  if (Array.isArray(root)) {
-    for (const child of root) {
-      const hit = findCircuitPset(child);
-      if (hit) return hit;
+  const seen = new WeakSet<object>();
+  const stack: Array<{ node: unknown; depth: number }> = [{ node: root, depth: 0 }];
+  const MAX_DEPTH = 12;
+  let budget = 20_000;
+
+  while (stack.length > 0 && budget-- > 0) {
+    const { node, depth } = stack.pop()!;
+    if (!node || typeof node !== "object") continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    if (depth > MAX_DEPTH) continue;
+
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push({ node: child, depth: depth + 1 });
+      continue;
     }
-    return null;
-  }
-  const node = root as Record<string, unknown>;
-  if (node.Name === "Pset_ElectricalCircuit" && Array.isArray(node.HasProperties)) {
-    const out: CircuitPset = {};
-    for (const entry of node.HasProperties as Array<Record<string, unknown>>) {
-      const key = asString(entry?.Name);
-      if (!key) continue;
-      const value = asString(entry.NominalValue ?? entry.UnitBasedValue);
-      if (value !== null) out[key] = value;
+
+    const record = node as Record<string, unknown>;
+    if (record.Name === "Pset_ElectricalCircuit" && Array.isArray(record.HasProperties)) {
+      const out: CircuitPset = {};
+      for (const entry of record.HasProperties as Array<Record<string, unknown>>) {
+        const key = asString(entry?.Name);
+        if (!key) continue;
+        const value = asString(entry.NominalValue ?? entry.UnitBasedValue);
+        if (value !== null) out[key] = value;
+      }
+      return out;
     }
-    return out;
-  }
-  for (const value of Object.values(node)) {
-    const hit = findCircuitPset(value);
-    if (hit) return hit;
+
+    for (const value of Object.values(record)) {
+      stack.push({ node: value, depth: depth + 1 });
+    }
   }
   return null;
 }
