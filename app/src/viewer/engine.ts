@@ -391,6 +391,75 @@ export class ViewerEngine {
    *    elements that are both bigger than the whole storey band AND reach
    *    outside it.
    */
+  /**
+   * The box the camera is framed on, measured from the RENDERED geometry.
+   *
+   * The Fragments box APIs are useless for framing on this model: `getBoxes()`,
+   * `getMergedBox(storeyIds)` and `getMergedBox(storeyChildren)` all return
+   * 280.9 x 546.6 x 281.1 "units". That number is not an API bug — it is REAL:
+   * measuring the three.js meshes directly shows two broken meshes spanning
+   * 652 m and 375 m, sitting hundreds of units from everything else. The
+   * house itself is the 45.9 m and 45.6 m meshes near the origin.
+   *
+   * So the frame is computed from per-mesh world-space bounding boxes with the
+   * outliers dropped, where "outlier" means the mesh's own span is many times
+   * the median mesh span. That is measured, not assumed.
+   */
+  private computeRenderedBounds(): THREE.Box3 {
+    const model = this.model;
+    const bounds = new THREE.Box3();
+    if (!model?.object) return bounds;
+
+    model.object.updateWorldMatrix(true, true);
+    const boxes: Array<{ box: THREE.Box3; span: number }> = [];
+
+    model.object.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      const geometry = mesh.geometry as THREE.BufferGeometry;
+      if (!geometry.boundingBox) {
+        try {
+          geometry.computeBoundingBox();
+        } catch {
+          return; // LOD geometry that will not compute; skip it
+        }
+      }
+      const local = geometry.boundingBox;
+      if (!local || local.isEmpty()) return;
+      const world = local.clone().applyMatrix4(mesh.matrixWorld);
+      const size = world.getSize(new THREE.Vector3());
+      boxes.push({ box: world, span: size.length() });
+    });
+
+    if (!boxes.length) return bounds;
+
+    // Median mesh span: the house is made of many similar-sized pieces, so the
+    // median is a robust scale even when a couple of meshes are nonsense.
+    const spans = boxes.map((b) => b.span).sort((a, b) => a - b);
+    const median = spans[Math.floor(spans.length / 2)] || 1;
+    const limit = Math.max(median * 8, 1);
+
+    let kept = 0;
+    for (const { box, span } of boxes) {
+      if (span > limit) continue;
+      bounds.union(box);
+      kept += 1;
+    }
+    this.outlierCount = boxes.length - kept;
+    this.boundsTrace = {
+      path: "rendered",
+      meshes: boxes.length,
+      median: +median.toFixed(2),
+      limit: +limit.toFixed(2),
+      kept,
+    };
+    // If every mesh looked like an outlier, fall back to the full union rather
+    // than framing nothing.
+    if (kept > 0) return bounds;
+    for (const { box } of boxes) bounds.union(box);
+    return bounds;
+  }
+
   private async computeBounds(localIds?: number[]): Promise<THREE.Box3> {
     const model = this.model;
     const bounds = new THREE.Box3();
@@ -416,33 +485,11 @@ export class ViewerEngine {
     if (!boxes.length) return bounds;
     this.boundsTrace = { ...this.boundsTrace, boxCount: boxes.length };
 
-    // The box APIs are NOT trustworthy on this model: getBoxes(),
-    // getMergedBox(7 storey ids) and getMergedBox(828 storey children) all
-    // return 280.9 x 546.6 x 281.1, while IfcOpenShell measures the real house
-    // at roughly 26 x 49 x 9 m with every storey inside a 3-11 m z-band. So the
-    // extent comes from the element CENTRES, which are reliable: they cluster
-    // tightly (median y = -3.4, IQR ~5) because the junk that inflates the
-    // boxes is in the extents, not the positions.
-    //
-    // Re-measure once the model is re-exported; this is a floor, not a ceiling.
-    const centres = boxes
-      .filter((box): box is THREE.Box3 => !!box)
-      .map((box) => box.clone().applyMatrix4(matrix).getCenter(new THREE.Vector3()))
-      .sort((a, b) => a.y - b.y);
-
-    if (centres.length >= 4) {
-      const robust = new THREE.Box3();
-      for (const point of centres) robust.expandByPoint(point);
-      this.outlierCount = 0;
-      this.boundsTrace = {
-        ...this.boundsTrace,
-        path: "centres",
-        points: centres.length,
-      };
-      // A guard so a genuinely tiny model is not blown up to a fixed size.
-      const size = robust.getSize(new THREE.Vector3());
-      if (size.length() > 1) return robust;
-    }
+    // Prefer the RENDERED geometry: it is the only measurement that is
+    // correct on a model containing broken imports. Fall back to the Fragments
+    // boxes only if the scene has no readable geometry at all.
+    const rendered = this.computeRenderedBounds();
+    if (!rendered.isEmpty()) return rendered;
 
     for (const box of boxes) {
       if (box) bounds.union(box.clone().applyMatrix4(matrix));
