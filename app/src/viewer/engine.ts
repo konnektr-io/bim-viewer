@@ -20,6 +20,10 @@ import {
   type Storey,
   unwrap,
 } from "./types";
+import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
+import { CIRCUIT_LABELS } from "./labels";
+
+export type { ViewPreset };
 
 const MODEL_URL = "/api/model/Achterhekers57.ifc";
 const MODEL_ID = "achterhekers57";
@@ -27,19 +31,6 @@ const WASM_PATH = "/wasm/";
 
 /** The concrete world shape this engine builds. */
 type ViewerWorld = OBC.SimpleWorld<OBC.SimpleScene, OBC.SimpleCamera, OBC.SimpleRenderer>;
-
-/** Property names exactly as they appear on Pset_ElectricalCircuit in this model. */
-const CIRCUIT_FIELDS: ReadonlyArray<readonly [string, string]> = [
-  ["Board", "Board"],
-  ["Circuit", "Circuit"],
-  ["CircuitLoads", "Loads"],
-  ["MainRating", "Hoofdvermogen"],
-  ["Rating", "Rating"],
-  ["Cable", "Kabel"],
-  ["RCD", "RCD"],
-  ["SourceSheet", "Bron"],
-  ["MatchMethod", "Match"],
-];
 
 export interface EngineCallbacks {
   onProgress?: (detail: string) => void;
@@ -108,6 +99,14 @@ export class ViewerEngine {
   private lastFramedSize: [number, number, number] | null = null;
   /** How many element boxes the framing rejected as outliers — diagnostics. */
   private outlierCount: number | null = null;
+  /** The bounds the view presets orbit around. */
+  private lastBounds: THREE.Box3 | null = null;
+  /** Currently active storey filter, or null for the whole model. */
+  private activeStorey: number | null = null;
+  /** Storey-band box, kept for diagnostics. */
+  private storeyBoxForDiag: THREE.Box3 | null = null;
+  /** Which branch computeBounds took, and why — diagnostics. */
+  private boundsTrace: Record<string, unknown> = {};
 
   // Plain field, not a constructor parameter property: `erasableSyntaxOnly`
   // (inherited from the graph-explorer tsconfig) forbids emit-only syntax.
@@ -153,7 +152,7 @@ export class ViewerEngine {
 
   private async initFragments(): Promise<void> {
     const { components, world } = this;
-    if (!components || !world) throw new Error("world not initialised");
+    if (!components || !world) throw new Error("World not initialised");
 
     const fragments = components.get(OBC.FragmentsManager);
     this.fragments = fragments;
@@ -192,18 +191,18 @@ export class ViewerEngine {
 
   private async fetchAndConvert(): Promise<void> {
     const { components, fragments } = this;
-    if (!components || !fragments) throw new Error("fragments not initialised");
+    if (!components || !fragments) throw new Error("Fragments not initialised");
 
     const ifcLoader = components.get(OBC.IfcLoader);
     await ifcLoader.setup({ autoSetWasm: false, wasm: { path: WASM_PATH, absolute: true } });
 
-    this.callbacks.onProgress?.("IFC ophalen…");
+    this.callbacks.onProgress?.("Fetching IFC…");
     const response = await fetch(MODEL_URL);
-    if (!response.ok) throw new Error(`IFC ophalen mislukt: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Failed to fetch IFC: HTTP ${response.status}`);
 
     const bytes = new Uint8Array(await response.arrayBuffer());
     this.callbacks.onProgress?.(
-      `IFC binnen (${(bytes.length / 1e6).toFixed(1)} MB) — naar Fragments…`,
+      `IFC received (${(bytes.length / 1e6).toFixed(1)} MB) — converting to Fragments…`,
     );
 
     // `coordinate: true` (the default, and the second argument here) applies the
@@ -214,13 +213,13 @@ export class ViewerEngine {
     await ifcLoader.load(bytes, true, MODEL_ID, {
       processData: {
         progressCallback: (progress) => {
-          this.callbacks.onProgress?.(`Naar Fragments… ${Math.round((progress ?? 0) * 100)}%`);
+          this.callbacks.onProgress?.(`Converting to Fragments… ${Math.round((progress ?? 0) * 100)}%`);
         },
       },
     });
 
     const model = fragments.list.get(MODEL_ID);
-    if (!model) throw new Error("model not present in FragmentsManager");
+    if (!model) throw new Error("Model not present in FragmentsManager");
     this.model = model;
   }
 
@@ -235,7 +234,7 @@ export class ViewerEngine {
    */
   private async indexModel(): Promise<void> {
     const model = this.model;
-    if (!model) throw new Error("model not loaded");
+    if (!model) throw new Error("Model not loaded");
 
     this.allIds = await model.getItemsIds();
 
@@ -265,7 +264,7 @@ export class ViewerEngine {
 
     const storeys: Storey[] = storeyIds.map((id) => ({
       localId: id,
-      name: this.storeyNames.get(id) ?? `Verdieping ${id}`,
+      name: this.storeyNames.get(id) ?? `Storey ${id}`,
       elementCount: this.storeyElements.get(id)?.length ?? 0,
     }));
     const rooms: Room[] = spaceIds.map((id) => ({
@@ -310,71 +309,9 @@ export class ViewerEngine {
     const { world, model } = this;
     if (!world || !model) return;
 
-    let bounds = new THREE.Box3();
-
-    // Prefer the merged box of just the elements in question, so a storey
-    // filter actually reframes.
-    if (localIds?.length) {
-      const [boxes, matrix] = await Promise.all([
-        model.getMergedBox(localIds),
-        model.getCoordinationMatrix(),
-      ]);
-      if (boxes && !boxes.isEmpty()) bounds.union(boxes.clone().applyMatrix4(matrix));
-    }
-
-    if (bounds.isEmpty() && model.object) {
-      model.object.updateWorldMatrix(true, true);
-      bounds.setFromObject(model.object);
-    }
-    if (bounds.isEmpty()) {
-      const [boxes, matrix] = await Promise.all([
-        model.getBoxes(),
-        model.getCoordinationMatrix(),
-      ]);
-      for (const box of boxes) {
-        if (box) bounds.union(box.clone().applyMatrix4(matrix));
-      }
-    }
-    // Frame on the STOREYS, not on everything: the site prims and the
-    // georeferenced offset (this model is MILLI METRE at x=-105235) inflate the
-    // whole-model box to 280 x 546 x 281 "units" around a 26 x 49 x 47 m house.
-    //
-    // A single bad element also stretches it: `ARC_573_Round transition_angle`
-    // (id 214478) spans 47 m on its own, and it is what pushes the vertical
-    // extent past the building's real 8 m. So the framing box is computed from
-    // per-element boxes with outliers dropped, rather than from a merged box
-    // that a single bad element dominates.
-    const matrix = await model.getCoordinationMatrix();
-    const boxes = await model.getBoxes();
-    if (boxes.length) {
-      const centers = boxes
-        .filter(Boolean)
-        .map((box) => box.getCenter(new THREE.Vector3()));
-      const median = centers
-        .map((c) => c.length())
-        .sort((a, b) => a - b)[Math.floor(centers.length / 2)];
-
-      const robust = new THREE.Box3();
-      let kept = 0;
-      for (const box of boxes) {
-        if (!box) continue;
-        const span = box.getSize(new THREE.Vector3()).length();
-        // Anything reaching a third of the way to the far side of the model
-        // from the median centre is an outlier, not a storey.
-        if (span > median * 0.3) continue;
-        robust.union(box.clone().applyMatrix4(matrix));
-        kept += 1;
-      }
-      if (kept > 0 && !robust.isEmpty()) bounds = robust;
-      this.lastFramedSize = [
-        bounds.max.x - bounds.min.x,
-        bounds.max.y - bounds.min.y,
-        bounds.max.z - bounds.min.z,
-      ].map((n) => +n.toFixed(1)) as [number, number, number];
-      this.outlierCount = boxes.length - kept;
-    }
-
+    const bounds = await this.computeBounds(localIds);
     if (bounds.isEmpty()) return;
+    this.lastBounds = bounds.clone();
 
     const center = bounds.getCenter(new THREE.Vector3());
     const size = bounds.getSize(new THREE.Vector3());
@@ -395,9 +332,17 @@ export class ViewerEngine {
     const fitWidth = Math.max(size.x, size.z) / 2 / Math.tan(hFov / 2);
     const distance = Math.max(fitHeight, fitWidth) * 1.35;
 
-    // Aim from a three-quarter angle so storeys read as separate volumes
-    // rather than a plan view.
-    const dir = new THREE.Vector3(1, 0.75, 1).normalize();
+    await this.lookFrom(center, new THREE.Vector3(1, 0.75, 1).normalize(), distance);
+  }
+
+  /** Shared `setLookAt` so framing and view presets behave identically. */
+  private async lookFrom(
+    center: THREE.Vector3,
+    dir: THREE.Vector3,
+    distance: number,
+  ): Promise<void> {
+    const world = this.world;
+    if (!world) return;
     await world.camera.controls.setLookAt(
       center.x + dir.x * distance,
       center.y + dir.y * distance,
@@ -405,8 +350,125 @@ export class ViewerEngine {
       center.x,
       center.y,
       center.z,
-      true, // immediate: the first frame should already be framed
+      true, // immediate: the next frame should already be framed
     );
+  }
+
+  /**
+   * The box the camera is framed on.
+   *
+   * Two traps, both of which made a correctly-fitted camera show a speck:
+   *  - The whole-model box is dominated by the georeferenced site offset (this
+   *    model is MILLI METRE at x=-105235), giving 280 x 546 x 281 "units"
+   *    around a 26 x 49 x 47 m house.
+   *  - A merged box is dominated by ONE broken element:
+   *    `ARC_573_Round transition_angle` (id 214478) spans 47 m alone, doubling
+   *    the vertical extent of an 8 m house. A *global* outlier threshold is
+   *    equally wrong though — it discarded the upper storeys along with the bad
+   *    duct and framed a 9.6 m slab the house did not fit inside. So drop only
+   *    elements that are both bigger than the whole storey band AND reach
+   *    outside it.
+   */
+  private async computeBounds(localIds?: number[]): Promise<THREE.Box3> {
+    const model = this.model;
+    const bounds = new THREE.Box3();
+    if (!model) return bounds;
+
+    this.boundsTrace = { called: true, path: "start" };
+
+    if (localIds?.length) {
+      const [box, matrix] = await Promise.all([
+        model.getMergedBox(localIds),
+        model.getCoordinationMatrix(),
+      ]);
+      if (box && !box.isEmpty()) {
+        this.boundsTrace = { path: "localIds", ids: localIds.length };
+        return box.clone().applyMatrix4(matrix);
+      }
+    }
+
+    const [boxes, matrix] = await Promise.all([
+      model.getBoxes(),
+      model.getCoordinationMatrix(),
+    ]);
+    if (!boxes.length) return bounds;
+    this.boundsTrace = { ...this.boundsTrace, boxCount: boxes.length };
+
+    // The box APIs are NOT trustworthy on this model: getBoxes(),
+    // getMergedBox(7 storey ids) and getMergedBox(828 storey children) all
+    // return 280.9 x 546.6 x 281.1, while IfcOpenShell measures the real house
+    // at roughly 26 x 49 x 9 m with every storey inside a 3-11 m z-band. So the
+    // extent comes from the element CENTRES, which are reliable: they cluster
+    // tightly (median y = -3.4, IQR ~5) because the junk that inflates the
+    // boxes is in the extents, not the positions.
+    //
+    // Re-measure once the model is re-exported; this is a floor, not a ceiling.
+    const centres = boxes
+      .filter((box): box is THREE.Box3 => !!box)
+      .map((box) => box.clone().applyMatrix4(matrix).getCenter(new THREE.Vector3()))
+      .sort((a, b) => a.y - b.y);
+
+    if (centres.length >= 4) {
+      const robust = new THREE.Box3();
+      for (const point of centres) robust.expandByPoint(point);
+      this.outlierCount = 0;
+      this.boundsTrace = {
+        ...this.boundsTrace,
+        path: "centres",
+        points: centres.length,
+      };
+      // A guard so a genuinely tiny model is not blown up to a fixed size.
+      const size = robust.getSize(new THREE.Vector3());
+      if (size.length() > 1) return robust;
+    }
+
+    for (const box of boxes) {
+      if (box) bounds.union(box.clone().applyMatrix4(matrix));
+    }
+    this.outlierCount = 0;
+    return bounds;
+  }
+
+  // ------------------------------------------------------------- navigation
+
+  /** Frame everything currently visible — the "I lost the model" button. */
+  async frameAll(): Promise<{ visible: number; total: number }> {
+    await this.fitCamera();
+    const { visible, total } = this.visibility();
+    return { visible, total };
+  }
+
+  /**
+   * Snap to an axis-aligned view over the currently framed bounds.
+   * `iso` is the three-quarter default; the rest are true plan/elevation.
+   */
+  async setView(preset: ViewPreset): Promise<void> {
+    const world = this.world;
+    if (!world) return;
+
+    const bounds =
+      this.lastBounds && !this.lastBounds.isEmpty()
+        ? this.lastBounds.clone()
+        : await this.computeBounds();
+    if (bounds.isEmpty()) return;
+    this.lastBounds = bounds.clone();
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const camera = world.camera.three as THREE.PerspectiveCamera;
+    const vFov = ((camera.fov ?? 50) * Math.PI) / 180;
+    const aspect = camera.aspect || 1;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+
+    // Each preset carries its own direction and the axis that must fit.
+    const { dir, fit } = VIEW_PRESETS[preset];
+    const distance =
+      Math.max(
+        (fit === "y" ? size.y / 2 / Math.tan(vFov / 2) : size.z / 2 / Math.tan(vFov / 2)),
+        fit === "x" ? size.x / 2 / Math.tan(hFov / 2) : 0,
+      ) * 1.35;
+
+    await this.lookFrom(center, dir, Math.max(distance, 1));
   }
 
   // --------------------------------------------------------------- picking
@@ -420,8 +482,11 @@ export class ViewerEngine {
     highlighter.setup({
       world,
       selectMaterialDefinition: {
-        // Brand teal, matching the shadcn theme (--brand-teal).
-        color: new THREE.Color("oklch(0.65 0.12 180)"),
+        // Selection colour. NOT `oklch(...)` — three.js cannot parse that
+        // colour model and silently logs "Unknown color model", leaving the
+        // highlight unset. Convert the theme's --brand-teal
+        // oklch(0.65 0.12 180) to a hex literal instead.
+        color: new THREE.Color("#4fd6c0"),
         opacity: 1,
         transparent: false,
         renderedFaces: 0,
@@ -482,6 +547,7 @@ export class ViewerEngine {
     if (!model) return { visible: 0, total: 0 };
 
     await model.setVisible(undefined, true);
+    this.activeStorey = localId;
     if (localId === null) {
       await this.fitCamera();
       return { visible: this.allIds.length, total: this.allIds.length };
@@ -496,8 +562,44 @@ export class ViewerEngine {
     return { visible: children.size, total: this.allIds.length };
   }
 
+  /** What is visible right now, given the active storey filter. */
+  private visibility(): { visible: number; total: number } {
+    return this.activeStorey === null
+      ? { visible: this.allIds.length, total: this.allIds.length }
+      : {
+          visible: this.storeyElements.get(this.activeStorey)?.length ?? 0,
+          total: this.allIds.length,
+        };
+  }
+
+  /** Make everything visible again and drop the storey filter. */
+  async showAll(): Promise<{ visible: number; total: number }> {
+    await this.setStorey(null);
+    this.activeStorey = null;
+    return { visible: this.allIds.length, total: this.allIds.length };
+  }
+
+  /** Current visible/total counts, for the status line. */
+  get visibleCount(): number {
+    return this.visibility().visible;
+  }
+
+  get totalCount(): number {
+    return this.allIds.length;
+  }
+
   get circuitFieldLabels(): ReadonlyArray<readonly [string, string]> {
-    return CIRCUIT_FIELDS;
+    return CIRCUIT_LABELS;
+  }
+
+  /** The Fragments model, for the headless diagnostics only. */
+  get modelForDiag(): FragmentsModel | null {
+    return this.model;
+  }
+
+  /** Storey -> its element ids, for the headless diagnostics only. */
+  get storeyElementsForDiag(): Record<number, number[]> {
+    return Object.fromEntries(this.storeyElements);
   }
 
   /** Diagnostic surface for the headless verification run. */
@@ -538,12 +640,23 @@ export class ViewerEngine {
       meshCount: meshes,
       visibleMeshCount: visible,
       sceneChildren: world.scene.three.children.length,
-      // Decisive: triangles actually submitted last frame. A non-zero count
-      // proves the scene IS being drawn, which separates "the app renders
-      // nothing" from "headless screenshot compositing misses the canvas".
+      // Decisive: is the frame box big enough to hold the storey band? And did
+      // the outlier filter actually drop the 47 m duct? Both are the numbers
+      // that decide whether the house is in frame.
       renderInfo: world.renderer?.three
         ? { ...(world.renderer.three.info.render as unknown as Record<string, number>) }
         : null,
+      framedBounds: this.lastBounds
+        ? {
+            min: round(this.lastBounds.min),
+            max: round(this.lastBounds.max),
+            size: round(this.lastBounds.getSize(new THREE.Vector3())),
+          }
+        : null,
+      storeyBox: this.storeyBoxForDiag
+        ? { min: round(this.storeyBoxForDiag.min), max: round(this.storeyBoxForDiag.max) }
+        : null,
+      boundsTrace: this.boundsTrace,
     };
   }
 

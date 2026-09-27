@@ -19,16 +19,14 @@ export function SelectionDetail() {
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground">
-          Selectie
+          Selection
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-1 text-sm">
-        <Row label="Categorie" value={selection.category} />
-        {selection.name ? <Row label="Naam" value={selection.name} /> : null}
-        <Row label="Ruimte" value={selection.room ?? "—"} />
-        {selection.guid ? (
-          <Row label="GlobalId" value={selection.guid} mono />
-        ) : null}
+        <Row label="Category" value={selection.category} />
+        {selection.name ? <Row label="Name" value={selection.name} /> : null}
+        <Row label="Room" value={selection.room ?? "—"} />
+        {selection.guid ? <Row label="GlobalId" value={selection.guid} mono /> : null}
 
         {circuitRows.length > 0 ? (
           <>
@@ -46,15 +44,7 @@ export function SelectionDetail() {
   );
 }
 
-function Row({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="grid grid-cols-[7rem_1fr] gap-2">
       <dt className="text-muted-foreground">{label}</dt>

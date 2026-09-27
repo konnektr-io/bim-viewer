@@ -5,7 +5,7 @@ import { useViewerStore } from "@/store/viewerStore";
 import type { ViewerEngine } from "@/viewer/engine";
 
 /**
- * Storey switcher. "Alles" restores the full model; a storey shows only its own
+ * Storey switcher. "All" restores the full model; a storey shows only its own
  * elements. A storey with 0 elements is a real state (A_Kelder is empty in this
  * model) so it is shown, not hidden.
  */
@@ -35,7 +35,7 @@ export function StoreyList() {
         onClick={() => void apply(null)}
       >
         <Layers className="size-4" />
-        Alles
+        All
       </Button>
       {storeys.map((storey) => (
         <Button
@@ -43,6 +43,7 @@ export function StoreyList() {
           variant={active === storey.localId ? "default" : "secondary"}
           size="sm"
           className="justify-between"
+          title={`${storey.elementCount} elements`}
           onClick={() => void apply(storey.localId)}
         >
           <span className="truncate">{storey.name}</span>

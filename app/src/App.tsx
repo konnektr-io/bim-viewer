@@ -2,6 +2,7 @@ import { SelectionDetail } from "@/components/SelectionDetail";
 import { StoreyList } from "@/components/StoreyList";
 import { FormatTabs } from "@/components/FormatTabs";
 import { UsdPlaceholder } from "@/components/UsdPlaceholder";
+import { ViewControls } from "@/components/ViewControls";
 import { ViewerCanvas } from "@/components/ViewerCanvas";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useViewerStore } from "@/store/viewerStore";
@@ -20,20 +21,20 @@ function StatusLine() {
   if (status.state === "ready") {
     return (
       <div className="text-sm text-muted-foreground">
-        {status.elementCount.toLocaleString("nl-BE")} elementen ·{" "}
-        {status.spaceCount} ruimtes · {status.storeyCount} verdiepingen
+        {status.elementCount.toLocaleString("en-US")} elements · {status.spaceCount} rooms ·{" "}
+        {status.storeyCount} storeys
         {visible !== null && total !== null && visible !== total
-          ? ` — ${visible.toLocaleString("nl-BE")} van ${total.toLocaleString("nl-BE")} zichtbaar`
+          ? ` — ${visible.toLocaleString("en-US")} of ${total.toLocaleString("en-US")} visible`
           : ""}
       </div>
     );
   }
-  return <div className="text-sm text-muted-foreground">Laden…</div>;
+  return <div className="text-sm text-muted-foreground">Loading…</div>;
 }
 
 export default function App() {
   const format = useViewerStore((s) => s.format);
-  const showStoreys = useViewerStore((s) => s.status.state === "ready");
+  const isReady = useViewerStore((s) => s.status.state === "ready");
 
   return (
     <div className="h-dvh w-full overflow-hidden bg-background text-foreground">
@@ -41,19 +42,22 @@ export default function App() {
       {format === "usd" ? <UsdPlaceholder /> : null}
       <FormatTabs />
 
-      <aside className="absolute left-3 top-3 z-10 w-80 max-w-[calc(100vw-1.5rem)]">
+      <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Achterhekers 57</CardTitle>
           </CardHeader>
           <CardContent>
             <StatusLine />
-            {format === "ifc" && showStoreys ? (
-              <div className="mt-4 space-y-3">
-                <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Verdieping
+            {format === "ifc" && isReady ? (
+              <div className="mt-4 space-y-4">
+                <ViewControls />
+                <div>
+                  <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Storey
+                  </div>
+                  <StoreyList />
                 </div>
-                <StoreyList />
                 <SelectionDetail />
               </div>
             ) : null}

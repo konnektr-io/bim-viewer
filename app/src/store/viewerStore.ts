@@ -7,6 +7,7 @@
 import { create } from "zustand";
 
 import type { Format, LoadStatus, Room, Selection, Storey } from "@/viewer/types";
+import type { ViewPreset } from "@/viewer/viewPresets";
 
 interface ViewerState {
   format: Format;
@@ -14,6 +15,7 @@ interface ViewerState {
   storeys: Storey[];
   rooms: Room[];
   activeStorey: number | null;
+  activeView: ViewPreset;
   selection: Selection | null;
   visibleCount: number | null;
   totalCount: number | null;
@@ -27,6 +29,7 @@ interface ViewerState {
   }) => void;
   setError: (message: string) => void;
   setStorey: (localId: number | null) => void;
+  setActiveView: (view: ViewPreset) => void;
   setSelection: (selection: Selection | null) => void;
   setVisibility: (visible: number, total: number) => void;
 }
@@ -37,6 +40,7 @@ export const useViewerStore = create<ViewerState>((set) => ({
   storeys: [],
   rooms: [],
   activeStorey: null,
+  activeView: "iso",
   selection: null,
   visibleCount: null,
   totalCount: null,
@@ -63,7 +67,9 @@ export const useViewerStore = create<ViewerState>((set) => ({
 
   setStorey: (activeStorey) => set({ activeStorey, selection: null }),
 
+  setActiveView: (activeView) => set({ activeView }),
+
   setSelection: (selection) => set({ selection }),
 
-  setVisibility: (visible, total) => set({ visibleCount: visible, totalCount: total }),
+  setVisibility: (visibleCount, totalCount) => set({ visibleCount, totalCount }),
 }));
