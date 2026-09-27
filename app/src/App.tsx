@@ -3,6 +3,7 @@ import { StoreyList } from "@/components/StoreyList";
 import { FormatTabs } from "@/components/FormatTabs";
 import { UsdPlaceholder } from "@/components/UsdPlaceholder";
 import { ViewControls } from "@/components/ViewControls";
+import { SectionControls } from "@/components/SectionControls";
 import { ViewerCanvas } from "@/components/ViewerCanvas";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useViewerStore } from "@/store/viewerStore";
@@ -43,10 +44,15 @@ export default function App() {
       {format === "usd" ? <UsdPlaceholder /> : null}
       <FormatTabs />
 
-      <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
+      {/*
+        LEFT: layers and views — what is shown, and how.
+        The view cube lives in the viewport's top-right corner, so it does not
+        need a row of text buttons here any more.
+      */}
+      <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-72 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">{modelTitle}</CardTitle>
+            <CardTitle className="truncate text-sm">{modelTitle}</CardTitle>
           </CardHeader>
           <CardContent>
             <StatusLine />
@@ -59,11 +65,20 @@ export default function App() {
                   </div>
                   <StoreyList />
                 </div>
-                <SelectionDetail />
               </div>
             ) : null}
           </CardContent>
         </Card>
+      </aside>
+
+      {/* RIGHT: what you clicked, and the section cut. */}
+      <aside className="absolute right-3 top-3 z-10 flex max-h-[calc(100dvh-1.5rem)] w-96 max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto">
+        {format === "ifc" && isReady ? (
+          <>
+            <SectionControls />
+            <SelectionDetail />
+          </>
+        ) : null}
       </aside>
     </div>
   );

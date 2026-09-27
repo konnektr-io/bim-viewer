@@ -9,7 +9,7 @@
  */
 import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
-import type { FragmentsModel } from "@thatopen/fragments";
+import type { FragmentsModel, MeshData } from "@thatopen/fragments";
 import * as THREE from "three";
 
 import {
@@ -21,6 +21,8 @@ import {
   unwrap,
 } from "./types";
 import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
+import { FACE_DIRECTIONS, ViewCube, type CubeFace } from "./viewCube";
+import { SectionPlane, type SectionState } from "./sectionPlane";
 import { CIRCUIT_LABELS } from "./labels";
 import type { ModelConfig } from "./types";
 
@@ -97,11 +99,38 @@ function findCircuitPset(root: unknown): CircuitPset | null {
   return null;
 }
 
+/**
+ * Flatten an item's own scalar attributes into `Name -> value`.
+ *
+ * Only the TOP level of the payload is read, and internal keys (the ones the
+ * fragments library prefixes with `_`) are skipped: they are bookkeeping, not
+ * model data, and showing them buries the attributes you actually want. Nested
+ * values are rendered as a short summary rather than walked, so this stays
+ * cheap and cannot recurse.
+ */
+function collectAttributes(item: ItemData): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(item as unknown as Record<string, unknown>)) {
+    if (key.startsWith("_")) continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === "object") {
+      const label = asString((value as Record<string, unknown>).Name ?? (value as Record<string, unknown>).value);
+      if (label) out[key] = label;
+      continue;
+    }
+    const text = asString(value);
+    if (text !== null) out[key] = text;
+  }
+  return out;
+}
+
 export class ViewerEngine {
   private components: OBC.Components | null = null;
   private fragments: OBC.FragmentsManager | null = null;
   private model: FragmentsModel | null = null;
   private world: ViewerWorld | null = null;
+  private viewCube: ViewCube | null = null;
+  private sectionPlane: SectionPlane | null = null;
 
   private allIds: number[] = [];
   /** element localId -> enclosing room localId */
@@ -165,6 +194,21 @@ export class ViewerEngine {
     world.camera = new OBC.SimpleCamera(components);
 
     components.init();
+
+    // The view cube mirrors the main camera every time the controls update, so
+    // it tracks orbiting and panning without a render loop of its own.
+    const cube = new ViewCube({
+      size: 128,
+      onSelect: (face) => {
+        void this.lookFromFace(face);
+      },
+    });
+    this.viewCube = cube;
+    container.append(cube.element);
+    const controls = world.camera.controls;
+    controls?.addEventListener("update", () => {
+      cube.updateOrientation(world.camera.three);
+    });
   }
 
   private async initFragments(): Promise<void> {
@@ -287,6 +331,16 @@ export class ViewerEngine {
     await this.waitForGeometry();
     await this.fitCamera();
 
+    // The section plane needs the real bounds to map its 0..1 offset onto world
+    // coordinates, so it is set up after the first successful measurement.
+    if (this.components && this.world && this.lastBounds) {
+      this.sectionPlane = new SectionPlane(this.world.scene.three);
+      this.sectionPlane.setBounds(this.lastBounds);
+      // Fragments draws with its own tiling renderer, so it needs the plane
+      // handed to it directly — material.clippingPlanes alone does nothing.
+      this.sectionPlane.attachFragmentsModel(this.model);
+    }
+
     const storeys: Storey[] = storeyIds.map((id) => ({
       localId: id,
       name: this.storeyNames.get(id) ?? `Storey ${id}`,
@@ -380,6 +434,30 @@ export class ViewerEngine {
   }
 
   /**
+   * Snap to a standard view chosen on the view cube, keeping the current
+   * distance so the cube does not also zoom.
+   */
+  private async lookFromFace(face: CubeFace): Promise<void> {
+    const world = this.world;
+    if (!world) return;
+    await this.waitForGeometry();
+
+    const bounds = this.lastBounds && !this.lastBounds.isEmpty()
+      ? this.lastBounds
+      : await this.computeBounds();
+    if (bounds.isEmpty()) return;
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const camera = world.camera.three as THREE.PerspectiveCamera;
+    const distance = camera.position.distanceTo(center) || 1;
+    // A perfectly vertical direction leaves the camera roll undefined, which is
+    // what made the old Top preset come out flipped; nudge Z by a hair.
+    const dir = FACE_DIRECTIONS[face].clone();
+    if (dir.y !== 0) dir.z += 0.0001;
+    await this.lookFrom(center, dir.normalize(), distance);
+  }
+
+  /**
    * The box the camera is framed on.
    *
    * Two traps, both of which made a correctly-fitted camera show a speck:
@@ -419,28 +497,21 @@ export class ViewerEngine {
   }
 
   /**
-   * The box the camera is framed on, measured from the RENDERED geometry.
+   * Per-mesh world boxes, with the outliers already dropped.
    *
-   * The Fragments box APIs are useless for framing on this model: `getBoxes()`,
-   * `getMergedBox(storeyIds)` and `getMergedBox(storeyChildren)` all return
-   * 280.9 x 546.6 x 281.1 "units". That number is not an API bug — it is REAL:
-   * measuring the three.js meshes directly shows two broken meshes spanning
-   * 652 m and 375 m, sitting hundreds of units from everything else. The
-   * house itself is the 45.9 m and 45.6 m meshes near the origin.
-   *
-   * So the frame is computed from per-mesh world-space bounding boxes with the
-   * outliers dropped, where "outlier" means the mesh's own span is many times
-   * the median mesh span. That is measured, not assumed.
+   * The Fragments box APIs cannot be used for framing on this model:
+   * `getBoxes()`, `getMergedBox(storeyIds)` and `getMergedBox(storeyChildren)`
+   * all report 280.9 x 546.6 x 281.1, and that number is REAL — reading the
+   * three.js meshes directly shows two broken meshes spanning 652 m and 375 m,
+   * hundreds of units from the house (45.9 m and 45.6 m near the origin). So the
+   * frame is measured from rendered geometry, and "outlier" means a mesh whose
+   * own span exceeds 8x the median mesh span.
    */
-  private computeRenderedBounds(): THREE.Box3 {
+  private collectRenderedMeshes(): Array<{ box: THREE.Box3; span: number; mesh: THREE.Mesh }> {
     const model = this.model;
-    const bounds = new THREE.Box3();
-    if (!model?.object) return bounds;
+    const found: Array<{ box: THREE.Box3; span: number; mesh: THREE.Mesh }> = [];
 
-    model.object.updateWorldMatrix(true, true);
-    const boxes: Array<{ box: THREE.Box3; span: number }> = [];
-
-    const collect = (root: THREE.Object3D): void => {
+    const read = (root: THREE.Object3D): void => {
       root.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
         if (!mesh.isMesh || !mesh.geometry) return;
@@ -456,62 +527,109 @@ export class ViewerEngine {
         if (!local || local.isEmpty()) return;
         mesh.updateWorldMatrix(true, false);
         const world = local.clone().applyMatrix4(mesh.matrixWorld);
-        boxes.push({ box: world, span: world.getSize(new THREE.Vector3()).length() });
+        found.push({ box: world, span: world.getSize(new THREE.Vector3()).length(), mesh });
       });
     };
 
-    collect(model.object);
-    // Fragments puts the real geometry under children of the model object that
-    // are only populated after the first render tick. If the walk above found
-    // nothing, try again over the whole scene graph.
-    if (!boxes.length) {
-      this.world?.scene.three.traverse((obj) => {
-        if (boxes.length) return;
-        const mesh = obj as THREE.Mesh;
-        if (!mesh.isMesh || !mesh.geometry) return;
-        const geometry = mesh.geometry as THREE.BufferGeometry;
-        try {
-          if (!geometry.boundingBox) geometry.computeBoundingBox();
-        } catch {
-          return;
-        }
-        const local = geometry.boundingBox;
-        if (!local || local.isEmpty()) return;
-        mesh.updateWorldMatrix(true, false);
-        const world = local.clone().applyMatrix4(mesh.matrixWorld);
-        boxes.push({ box: world, span: world.getSize(new THREE.Vector3()).length() });
-      });
+    if (model?.object) {
+      model.object.updateWorldMatrix(true, true);
+      read(model.object);
     }
+    // Fragments populates the scene graph asynchronously, so if the model object
+    // yielded nothing, try the whole scene.
+    if (!found.length) this.world?.scene.three.traverse(read);
+    return found;
+  }
 
-    if (!boxes.length) {
-      this.boundsTrace = { ...this.boundsTrace, path: "rendered-empty" };
+  private computeRenderedBounds(): THREE.Box3 {
+    const bounds = new THREE.Box3();
+    const all = this.collectRenderedMeshes();
+    if (!all.length) {
+      this.boundsTrace = { path: "rendered-empty" };
       return bounds;
     }
 
-    // Median mesh span: the house is made of many similar-sized pieces, so the
-    // median is a robust scale even when a couple of meshes are nonsense.
-    const spans = boxes.map((b) => b.span).sort((a, b) => a - b);
+    // Median mesh span: the house is many similar-sized pieces, so the median is
+    // a robust scale even when a couple of meshes are nonsense.
+    const spans = all.map((m) => m.span).sort((a, b) => a - b);
     const median = spans[Math.floor(spans.length / 2)] || 1;
     const limit = Math.max(median * 8, 1);
 
     let kept = 0;
-    for (const { box, span } of boxes) {
+    for (const { box, span } of all) {
       if (span > limit) continue;
       bounds.union(box);
       kept += 1;
     }
-    this.outlierCount = boxes.length - kept;
+    this.outlierCount = all.length - kept;
     this.boundsTrace = {
       path: "rendered",
-      meshes: boxes.length,
+      meshes: all.length,
       median: +median.toFixed(2),
       limit: +limit.toFixed(2),
       kept,
     };
-    // If every mesh looked like an outlier, fall back to the full union rather
-    // than framing nothing.
     if (kept > 0) return bounds;
-    for (const { box } of boxes) bounds.union(box);
+    for (const { box } of all) bounds.union(box);
+    return bounds;
+  }
+
+  /**
+   * The true extent of some items, measured from their own mesh geometry.
+   *
+   * The Fragments box APIs cannot be used for framing on this model:
+   * `getBoxes()`, `getMergedBox(storeyIds)` and `getMergedBox(storeyChildren)`
+   * all report 280.9 x 546.6 x 281.1, and that number is REAL — reading the
+   * rendered three.js meshes directly shows two broken meshes spanning 652 m and
+   * 375 m, hundreds of units from the house (45.9 m and 45.6 m near the origin).
+   * The outliers live inside the union, so no amount of filtering the reported
+   * boxes helps.
+   *
+   * `getItemsGeometry(ids)` returns each item's real vertex positions plus its
+   * transform, which is the only measurement that is both id-scoped (so a storey
+   * can be framed on itself) and complete. Note that `getPositions()` is NOT
+   * usable here: on this model it returns 798 vertices for a 13,493-element
+   * house, so it frames a 119 m box and draws 3,084 triangles instead of 191,940.
+   */
+  private async boundsFromGeometry(localIds?: number[]): Promise<THREE.Box3> {
+    const model = this.model;
+    const bounds = new THREE.Box3();
+    if (!model) return bounds;
+
+    let matrix: THREE.Matrix4;
+    let groups: MeshData[][];
+    try {
+      [matrix, groups] = await Promise.all([
+        model.getCoordinationMatrix(),
+        localIds?.length ? model.getItemsGeometry(localIds) : Promise.resolve([]),
+      ]);
+    } catch (error) {
+      console.warn("getItemsGeometry failed", error);
+      return bounds;
+    }
+    if (!groups.length) return bounds;
+
+    let vertices = 0;
+    for (const group of groups) {
+      for (const mesh of group) {
+        const positions = mesh.positions;
+        if (!positions?.length) continue;
+        const transform = mesh.transform ?? new THREE.Matrix4();
+        for (let i = 0; i + 2 < positions.length; i += 3) {
+          bounds.expandByPoint(
+            new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2])
+              .applyMatrix4(transform)
+              .applyMatrix4(matrix),
+          );
+          vertices += 1;
+        }
+      }
+    }
+    if (!vertices) return bounds;
+    this.boundsTrace = {
+      path: localIds?.length ? "geometry-scoped" : "geometry",
+      vertices,
+    };
     return bounds;
   }
 
@@ -522,34 +640,29 @@ export class ViewerEngine {
 
     this.boundsTrace = { called: true, path: "start" };
 
+    // When a specific set of items was asked for, their own geometry is the
+    // only trustworthy measurement: the rendered-mesh path cannot filter by id,
+    // and the Fragments boxes are the thing that is broken.
     if (localIds?.length) {
-      const [box, matrix] = await Promise.all([
-        model.getMergedBox(localIds),
-        model.getCoordinationMatrix(),
-      ]);
-      if (box && !box.isEmpty()) {
-        this.boundsTrace = { path: "localIds", ids: localIds.length };
-        return box.clone().applyMatrix4(matrix);
+      const scoped = await this.boundsFromGeometry(localIds);
+      if (!scoped.isEmpty()) {
+        this.outlierCount = 0;
+        return scoped;
       }
     }
 
+    // Whole model: measure the rendered geometry, dropping the outlier meshes.
+    const rendered = this.computeRenderedBounds();
+    if (!rendered.isEmpty()) return rendered;
+
+    // Last resort: the Fragments boxes, which at least return something.
     const [boxes, matrix] = await Promise.all([
       model.getBoxes(),
       model.getCoordinationMatrix(),
     ]);
-    if (!boxes.length) return bounds;
-    this.boundsTrace = { ...this.boundsTrace, boxCount: boxes.length };
-
-    // Prefer the RENDERED geometry: it is the only measurement that is
-    // correct on a model containing broken imports. Fall back to the Fragments
-    // boxes only if the scene has no readable geometry at all.
-    const rendered = this.computeRenderedBounds();
-    if (!rendered.isEmpty()) return rendered;
-
     for (const box of boxes) {
       if (box) bounds.union(box.clone().applyMatrix4(matrix));
     }
-    this.outlierCount = 0;
     return bounds;
   }
 
@@ -660,6 +773,7 @@ export class ViewerEngine {
         guid: asString(item._guid),
         room: roomId == null ? null : (this.roomNames.get(roomId) ?? `#${roomId}`),
         circuit: findCircuitPset(item),
+        attributes: collectAttributes(item),
       });
     } catch (err) {
       this.callbacks.onError?.(err instanceof Error ? err.message : String(err));
@@ -687,6 +801,24 @@ export class ViewerEngine {
     // stays where the whole model was framed from.
     await this.fitCamera(children.size ? [...children] : undefined);
     return { visible: children.size, total: this.allIds.length };
+  }
+
+  /**
+   * Move or toggle the section plane.
+   *
+   * `side` is the above/below control: the plane stays where it is and only the
+   * normal flips, so the same slider shows the storey above the cut or the one
+   * below it. Storey isolation cannot express that (it can only show one whole
+   * storey), which is why this is a separate control.
+   */
+  setSection(state: SectionState): void {
+    const section = this.sectionPlane;
+    if (!section) return;
+    section.setBounds(this.lastBounds);
+    section.apply(state, this.world?.renderer?.three as THREE.WebGLRenderer | undefined);
+    // Ask the fragments renderer for a fresh frame, otherwise the new plane is
+    // only picked up on the next camera move.
+    void this.fragments?.core.update(true);
   }
 
   /** What is visible right now, given the active storey filter. */
@@ -789,6 +921,31 @@ export class ViewerEngine {
         ? { min: round(this.storeyBoxForDiag.min), max: round(this.storeyBoxForDiag.max) }
         : null,
       boundsTrace: this.boundsTrace,
+      viewCubeMounted: this.viewCube !== null,
+      sectionReady: this.sectionPlane !== null,
+      sectionApplied: this.sectionPlane?.isApplied ?? false,
+      sectionPlane: this.sectionPlane
+        ? {
+            normal: [
+              +this.sectionPlane.plane.normal.x.toFixed(2),
+              +this.sectionPlane.plane.normal.y.toFixed(2),
+              +this.sectionPlane.plane.normal.z.toFixed(2),
+            ],
+            constant: +this.sectionPlane.plane.constant.toFixed(2),
+          }
+        : null,
+      clippedMaterials: (() => {
+        let count = 0;
+        world.scene.three.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
+          if (!material || !mesh.isMesh) return;
+          for (const entry of Array.isArray(material) ? material : [material]) {
+            if (entry?.clippingPlanes?.length) count += 1;
+          }
+        });
+        return count;
+      })(),
     };
   }
 

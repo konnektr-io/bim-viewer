@@ -8,6 +8,10 @@ import { create } from "zustand";
 
 import type { Format, LoadStatus, Room, Selection, Storey } from "@/viewer/types";
 import type { ViewPreset } from "@/viewer/viewPresets";
+import {
+  DEFAULT_SECTION,
+  type SectionState,
+} from "@/viewer/sectionPlane";
 
 interface ViewerState {
   format: Format;
@@ -20,6 +24,7 @@ interface ViewerState {
   selection: Selection | null;
   visibleCount: number | null;
   totalCount: number | null;
+  section: SectionState;
 
   setFormat: (format: Format) => void;
   setModelTitle: (title: string) => void;
@@ -34,6 +39,8 @@ interface ViewerState {
   setActiveView: (view: ViewPreset) => void;
   setSelection: (selection: Selection | null) => void;
   setVisibility: (visible: number, total: number) => void;
+  setSection: (patch: Partial<SectionState>) => void;
+  resetSection: () => void;
 }
 
 export const useViewerStore = create<ViewerState>((set) => ({
@@ -47,6 +54,7 @@ export const useViewerStore = create<ViewerState>((set) => ({
   selection: null,
   visibleCount: null,
   totalCount: null,
+  section: DEFAULT_SECTION,
 
   setFormat: (format) => set({ format, selection: null }),
 
@@ -77,4 +85,8 @@ export const useViewerStore = create<ViewerState>((set) => ({
   setSelection: (selection) => set({ selection }),
 
   setVisibility: (visibleCount, totalCount) => set({ visibleCount, totalCount }),
+
+  setSection: (patch) => set((state) => ({ section: { ...state.section, ...patch } })),
+
+  resetSection: () => set({ section: DEFAULT_SECTION }),
 }));

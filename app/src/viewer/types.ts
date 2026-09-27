@@ -56,6 +56,12 @@ export interface Selection {
   guid: string | null;
   room: string | null;
   circuit: CircuitPset | null;
+  /**
+   * Every scalar attribute the fragments payload carried, flattened to
+   * `Name -> value`. Needed to inspect elements the viewer has no special
+   * handling for, and to quote exact values when requesting model edits.
+   */
+  attributes: Record<string, string>;
 }
 
 export type LoadStatus =
