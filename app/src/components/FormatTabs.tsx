@@ -9,12 +9,11 @@ export function FormatTabs() {
   const format = useViewerStore((s) => s.format);
   const setFormat = useViewerStore((s) => s.setFormat);
 
-  const tab = (value: Format, label: string, disabled = false) => (
+  const tab = (value: Format, label: string) => (
     <Button
       key={value}
       size="sm"
       variant={format === value ? "default" : "ghost"}
-      disabled={disabled}
       onClick={() => setFormat(value)}
       className="gap-2"
     >
@@ -29,7 +28,7 @@ export function FormatTabs() {
       className="absolute left-1/2 top-3 z-20 flex -translate-x-1/2 gap-1 rounded-lg border bg-card p-1"
     >
       {tab("ifc", "IFC")}
-      {tab("usd", "USD", true)}
+      {tab("usd", "USD")}
     </div>
   );
 }

@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -172,6 +173,187 @@ def client_config() -> dict[str, str]:
     }
 
 
+# --------------------------------------------------------------------------
+# USD — the flattened layer stack, proxied from S3
+# --------------------------------------------------------------------------
+# WHY IT IS PROXIED AND NOT BAKED INTO THE IMAGE
+# ----------------------------------------------
+# three.js `USDLoader` cannot open a layer stack at all: for a standalone file it
+# calls `composer.compose(data, {}, {}, path)` with an EMPTY assets dict, so
+# `_resolveReference` can only ever return null, and no parser in the package
+# reads `subLayers`. The house stack is 5 subLayers deep plus a reference, so the
+# loader renders nothing. The build step (`cad/build_web_usd.py`) flattens the
+# whole stack into one self-contained ASCII layer, and THAT is what is fetched
+# here — the same arrangement as the IFC, so no S3 key ever reaches the browser
+# and no derived geometry is baked into an image.
+#
+# ASCII and not .usdc on purpose: `USDCParser._readInlinedValue` has no case for
+# the `double` vector variants, so a `double3` decodes as a raw uint32 (142 of
+# 1378 xformOp:translate attributes on this model) and `applyTransform` throws.
+# The ASCII parser decodes them correctly, and gzip -9 takes it from 31.9 MB to
+# 4.9 MB on the wire.
+#
+#   S3_USD_PREFIX  key prefix holding the flattened scene   (optional)
+#
+# Without it, or with the object absent, the USD endpoints return 503 and the
+# frontend says so plainly; the IFC tab is unaffected.
+USD_PREFIX = os.environ.get("S3_USD_PREFIX", "").strip("/")
+
+
+async def _s3_get_bytes(key: str, timeout: float = 30.0) -> bytes:
+    """Fetch a small object out of the bucket and return its bytes.
+
+    Used for the manifest, which the scene endpoint needs in order to learn the
+    flattened file's name. Same hand-rolled SigV4 and path-style addressing as
+    the IFC proxy: Garage is behind one hostname, so a virtual-host URL 404s.
+    """
+    try:
+        config = get_s3()
+    except RuntimeError as exc:
+        log.error("S3 not configured: %s", exc)
+        raise HTTPException(status_code=503, detail="storage not configured") from exc
+
+    signed = sign_get(
+        config, method="GET", key=key, now=dt.datetime.now(dt.timezone.utc), byte_range=None
+    )
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=True) as client:
+        try:
+            response = await client.get(signed["url"], headers=signed["headers"])
+        except httpx.HTTPError as exc:
+            log.error("S3 GET %s failed: %s", key, exc)
+            raise HTTPException(status_code=502, detail="storage unreachable") from exc
+
+    # Never swallow a non-200: a signing or addressing regression otherwise looks
+    # exactly like "the scene was never built".
+    if response.status_code != 200:
+        log.error("S3 GET %s -> %s: %s", key, response.status_code, response.content[:200])
+        raise HTTPException(
+            status_code=404 if response.status_code == 404 else 502,
+            detail="usd scene not built" if response.status_code == 404 else "storage error",
+        )
+    return response.content
+
+
+async def _s3_stream(key: str) -> Response:
+    """Proxy one object straight through to the browser.
+
+    The body is served EXACTLY as stored. A `.gz` object keeps its bytes and
+    gains `content-encoding: gzip`, which the browser inflates once; inflating it
+    here while keeping that header is what makes every fetch fail with
+    ERR_CONTENT_DECODING_FAILED, which surfaces only as "Failed to fetch".
+    """
+    try:
+        config = get_s3()
+    except RuntimeError as exc:
+        log.error("S3 not configured: %s", exc)
+        raise HTTPException(status_code=503, detail="storage not configured") from exc
+
+    signed = sign_get(
+        config, method="GET", key=key, now=dt.datetime.now(dt.timezone.utc), byte_range=None
+    )
+    # The client deliberately outlives this handler: StreamingResponse consumes
+    # the body after the endpoint returns, so a `with` block would close the
+    # connection first. It is closed in the generator's finally.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0), follow_redirects=True)
+    try:
+        upstream_request = client.build_request("GET", signed["url"], headers=signed["headers"])
+        upstream = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        log.error("S3 request failed for %s: %s", key, exc)
+        raise HTTPException(status_code=502, detail="storage unreachable") from exc
+
+    if upstream.status_code != 200:
+        detail = await upstream.aread()
+        await upstream.aclose()
+        await client.aclose()
+        log.error("S3 GET %s -> %s: %s", key, upstream.status_code, detail[:200])
+        raise HTTPException(
+            status_code=404 if upstream.status_code == 404 else 502,
+            detail="usd scene not found" if upstream.status_code == 404 else "storage error",
+        )
+
+    out_headers: dict[str, str] = {
+        "content-type": "text/plain",
+        "cache-control": "public, max-age=3600, must-revalidate",
+    }
+    if key.endswith(".gz"):
+        out_headers["content-encoding"] = "gzip"
+    for header in ("content-length", "etag", "last-modified"):
+        if header in upstream.headers:
+            out_headers[header] = upstream.headers[header]
+
+    async def stream_body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    # Pass the async generator OBJECT, never the function. Starlette sniffs with
+    # isinstance(content, AsyncIterable), and a function object is not an
+    # AsyncIterable — given the function it falls back to iterate_in_threadpool
+    # and dies with "'function' object is not iterable".
+    return StreamingResponse(stream_body(), status_code=200, headers=out_headers)
+
+
+def _usd_key(*parts: str) -> str:
+    if not USD_PREFIX:
+        raise HTTPException(status_code=503, detail="usd scene not configured")
+    return "/".join([USD_PREFIX, *parts])
+
+
+async def _usd_manifest_json() -> dict:
+    """The manifest, parsed and checked.
+
+    Parsing here rather than in the browser is deliberate: a manifest that does
+    not parse would otherwise surface as a silently blank USD tab, and a missing
+    `file` key would only fail on the NEXT request.
+    """
+    try:
+        return json.loads(await _s3_get_bytes(_usd_key("manifest.json")))
+    except json.JSONDecodeError as exc:
+        log.error("USD manifest is not valid JSON: %s", exc)
+        raise HTTPException(status_code=503, detail="usd manifest broken") from exc
+
+
+@app.get("/api/usd/manifest")
+async def usd_manifest() -> Response:
+    """The layer / storey / category index for the USD view.
+
+    Produced at build time by pxr, which is the only place the sublayer structure
+    is still known — after flattening, a root prim is just a name, so the browser
+    cannot derive these groups for itself.
+    """
+    body = await _s3_get_bytes(_usd_key("manifest.json"))
+    try:
+        json.loads(body)
+    except json.JSONDecodeError as exc:
+        log.error("USD manifest is not valid JSON: %s", exc)
+        raise HTTPException(status_code=503, detail="usd manifest broken") from exc
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"cache-control": "public, max-age=300, must-revalidate"},
+    )
+
+
+@app.get("/api/usd/scene")
+async def usd_scene() -> Response:
+    """Stream the flattened, gzipped USD layer.
+
+    The file name comes from the manifest rather than from configuration, so a
+    rebuild that renames the flattened layer needs no redeploy.
+    """
+    manifest = await _usd_manifest_json()
+    name = manifest.get("file")
+    if not isinstance(name, str) or not name:
+        log.error("USD manifest has no usable `file` key")
+        raise HTTPException(status_code=503, detail="usd manifest broken")
+    return await _s3_stream(_usd_key(name))
+
+
 @app.api_route("/api/model/{slug}", methods=["GET", "HEAD"])
 async def stream_model(request: Request, slug: str) -> Response:
     """Stream the model from Garage straight through to the browser.
@@ -214,7 +396,7 @@ async def stream_model(request: Request, slug: str) -> Response:
         detail = await upstream.aread()
         await upstream.aclose()
         await client.aclose()
-        log.error("S3 %s %s -> %s: %s", method, MODEL_KEY, upstream.status_code, detail[:200])
+        log.error("S3 %s %s -> %s: %s", method, model_key, upstream.status_code, detail[:200])
         raise HTTPException(
             status_code=404 if upstream.status_code == 404 else 502,
             detail="model not found" if upstream.status_code == 404 else "storage error",
