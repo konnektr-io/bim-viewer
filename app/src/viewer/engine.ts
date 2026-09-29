@@ -427,6 +427,8 @@ export class ViewerEngine {
    * error from the one this whole change set started with.
    */
   private disposed = false;
+  /** Detaches from `fragments.onBeforeDispose`; see initFragments. */
+  private onFragmentsBeforeDispose: (() => void) | null = null;
 
   // Plain field, not a constructor parameter property: `erasableSyntaxOnly`
   // (inherited from the graph-explorer tsconfig) forbids emit-only syntax.
@@ -496,6 +498,32 @@ export class ViewerEngine {
     // The worker must match the installed @thatopen/fragments build; the
     // library resolves that itself. Passing any other URL is a schema mismatch.
     fragments.init(await OBC.FragmentsManager.getWorker());
+
+    // Stop the fragments updater BEFORE the core is dropped.
+    //
+    // `FragmentsManager.dispose()` calls `core.dispose()`, which deletes the
+    // models, and then sets `_core = undefined` — but the worker's update timer
+    // keeps running. A tick already queued against a deleted model then lands
+    // and throws "Fragments: Model not found" INSIDE the worker, where the main
+    // thread cannot catch it. `onBeforeDispose` is the hook that fires before
+    // the teardown, so stopping there closes the window.
+    //
+    // `controllerManager` is not on the public `FragmentsModels` type, so it is
+    // reached structurally and treated as optional.
+    this.onFragmentsBeforeDispose = () => {
+      try {
+        const core = fragments.initialized ? fragments.core : null;
+        const updater = (
+          core as unknown as {
+            controllerManager?: { updater?: { stop?: () => void } };
+          }
+        )?.controllerManager?.updater;
+        updater?.stop?.();
+      } catch {
+        // No core, nothing to stop.
+      }
+    };
+    fragments.onBeforeDispose.add(this.onFragmentsBeforeDispose);
 
     // SimpleCamera.controls is typed as optional on the base camera.
     const controls = world.camera.controls;
@@ -1325,26 +1353,7 @@ export class ViewerEngine {
     }
     this.onControlsUpdate = null;
     this.onCameraChanged = null;
-
-    // Stop the fragments updater BEFORE disposing. The library's own
-    // `dispose()` drops the model but leaves the worker's update timer running,
-    // so a tick already queued against the deleted model lands afterwards and
-    // throws "Fragments: Model not found" from inside the worker — an error we
-    // cannot catch from this thread. `initialized` is the guard: it is false
-    // only after dispose, so this is safe to touch before the call.
-    try {
-      // `controllerManager` is not on the public FragmentsModels type, so reach
-      // it structurally and treat its absence as "nothing to stop".
-      const core = this.fragments?.initialized ? this.fragments.core : null;
-      const updater = (
-        core as unknown as {
-          controllerManager?: { updater?: { stop?: () => void } };
-        }
-      )?.controllerManager?.updater;
-      updater?.stop?.();
-    } catch {
-      // The core is already gone; nothing left to stop.
-    }
+    this.onFragmentsBeforeDispose = null;
 
     this.components?.dispose?.();
     this.components = null;
