@@ -9,6 +9,7 @@
 import { create } from "zustand";
 
 import type { UsdGroup, UsdLayer, UsdLoadStatus, UsdPrimInfo } from "@/viewer/usdTypes";
+import type { AssetNode } from "@/components/AssetTree";
 import { DEFAULT_SECTION, type SectionState } from "@/viewer/sectionPlane";
 
 interface UsdState {
@@ -24,7 +25,13 @@ interface UsdState {
   visibleCount: number | null;
   totalCount: number | null;
   section: SectionState;
+  /** The browsable model hierarchy, built once from the prim paths. */
+  tree: AssetNode[];
+  /** The tree node currently isolating visibility, or null. */
+  isolatedNodeId: string | null;
 
+  setTree: (tree: AssetNode[]) => void;
+  setIsolatedNode: (id: string | null) => void;
   setModelTitle: (title: string) => void;
   setLoading: (detail: string) => void;
   setReady: (info: { meshCount: number; layers: UsdLayer[]; storeys: UsdGroup[] }) => void;
@@ -51,6 +58,11 @@ export const useUsdStore = create<UsdState>((set) => ({
   visibleCount: null,
   totalCount: null,
   section: DEFAULT_SECTION,
+  tree: [],
+  isolatedNodeId: null,
+
+  setTree: (tree) => set({ tree }),
+  setIsolatedNode: (isolatedNodeId) => set({ isolatedNodeId }),
 
   setModelTitle: (modelTitle) => set({ modelTitle }),
 

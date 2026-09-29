@@ -6,6 +6,7 @@ import { UsdLayerList, UsdStoreyList } from "@/components/UsdLayerList";
 import { UsdSelectionDetail } from "@/components/UsdSelectionDetail";
 import { ViewControls } from "@/components/ViewControls";
 import { SectionControls } from "@/components/SectionControls";
+import { ModelTree } from "@/components/ModelTree";
 import { ViewerCanvas } from "@/components/ViewerCanvas";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useUsdStore } from "@/store/usdStore";
@@ -74,7 +75,7 @@ export default function App() {
         The view cube lives in the viewport's top-right corner, so it does not
         need a row of text buttons here any more.
       */}
-      <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-72 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
+      <aside className="absolute left-3 top-3 z-10 max-h-[calc(100dvh-1.5rem)] w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="truncate text-sm">{title}</CardTitle>
@@ -84,6 +85,7 @@ export default function App() {
             {format === "ifc" && isReady ? (
               <div className="mt-4 space-y-4">
                 <ViewControls format="ifc" />
+                <ModelTree format="ifc" />
                 <div>
                   <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     Storey
@@ -95,6 +97,7 @@ export default function App() {
             {format === "usd" && usdReady ? (
               <div className="mt-4 space-y-4">
                 <ViewControls format="usd" />
+                <ModelTree format="usd" />
                 <UsdLayerList />
                 <UsdStoreyList />
               </div>

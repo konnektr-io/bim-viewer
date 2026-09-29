@@ -32,6 +32,11 @@ plane, frame-all, the right-hand inspector — and differ only in what they load
   `house_ifc.usda`) and `Bathroom` (70, `bathroom_design.usd`).
 - **Storey isolation**, from the IFC path segment the geometry lives under.
 - **Section plane** — the same component, clipping stock three.js materials.
+  Because the clip is a *shader* clip, the section also removes clipped geometry
+  from the **pickable** set, so you cannot select a roof you have cut away.
+- **Asset tree** — layer → storey → category → element, searchable, and clicking a
+  node isolates it. Built from the prim paths, which are the only place the
+  hierarchy still exists after flattening.
 - **Prim inspector**: the full USD prim path (copyable), the storey, category and
   element name decoded from that path, and per-mesh geometry facts.
 
@@ -131,6 +136,8 @@ plane, frame-all, the right-hand inspector — and differ only in what they load
   (and on its type object) as its own collapsible group, material layer sets,
   a filter box over names and values, and copy buttons for `localId` /
   `GlobalId` / the whole pasteable block.
+- **Asset tree** — the same component as the USD tab, built from
+  `getItemsOfCategories` (see the note on `getSpatialStructure` below).
 - No settings panel, no accounts.
 
 ### USD (three.js `USDLoader`)
@@ -140,6 +147,11 @@ plane, frame-all, the right-hand inspector — and differ only in what they load
   `house_ifc.usda`) and `Bathroom` (70, `bathroom_design.usd`).
 - **Storey isolation**, from the IFC path segment the geometry lives under.
 - **Section plane** — the same component, clipping stock three.js materials.
+  Because the clip is a *shader* clip, the section also removes clipped geometry
+  from the **pickable** set, so you cannot select a roof you have cut away.
+- **Asset tree** — layer → storey → category → element, searchable, and clicking a
+  node isolates it. Built from the prim paths, which are the only place the
+  hierarchy still exists after flattening.
 - **Prim inspector**: the full USD prim path (copyable), the storey, category and
   element name decoded from that path, and per-mesh geometry facts.
 
@@ -352,6 +364,37 @@ Decompressing server-side while keeping the header makes every `fetch` fail with
 `ERR_CONTENT_DECODING_FAILED`, which surfaces only as "Failed to fetch" in the
 status line.
 
+## Lighting: an environment map, and why it is bound AFTER the load
+
+Three things have to be true or large parts of the model render black:
+
+1. **There must be direction-INDEPENDENT light.** Measured on this scene: 52.6%
+   of the 1450 meshes face away from every directional light, and a further 19.2%
+   have a very dark base colour (the bathroom's `212124` bodies have a base
+   luminance of **0.016**). Raising ambient or directional intensity does not fix
+   that — it brightens the already-lit faces and blows them out while the
+   away-facing ones stay black. An environment map is the only thing that works.
+2. **It must be a GRADIENT, not `RoomEnvironment`.** `RoomEnvironment` is built
+   from emissive-white area lights (three.js `createAreaLightMaterial`) and
+   measures at **15.01% saturated** — it reintroduces the blowout. A vertical
+   gradient (bright zenith, dark ground) encodes a real sky and costs no
+   download.
+3. **It must be bound after `parse()`.** `scene.environment` reaches a material
+   when it is first rendered, and the USD composer creates its own
+   `MeshPhysicalMaterial` instances during `parse()`. Set before the load, the
+   measurement is `withEnv: 0` of 1450 — no material has an envMap at all, and
+   raising `environmentIntensity` does nothing. The materials are now bound
+   explicitly once they exist (`withEnv: 1450 of 1450`).
+
+Result: black faces 54.39% → 30.73% of model pixels, luma 24.3 → 75.5,
+saturation 0.00%. The residual is the scene's own dark materials.
+
+**Measure black faces against a background you control.** The viewport
+background is `0x0b111d` = (11,17,29), which passes any `r<24 && g<30 && b<42`
+background filter — and so does a black facet rendering to (0,0,0). Probes using
+that filter report `0.00% black` no matter how dark the model is. Set the
+background to magenta for the duration of the probe.
+
 ## Known gaps
 
 - **The USD carries no semantics.** No `GlobalId`, no property sets, no room
@@ -372,3 +415,6 @@ status line.
 - The USD parse is **client-side and synchronous** (~15 s for a 32 MB ASCII
   layer), which blocks the main thread. A `.usdc` would be 7× smaller but hits
   the parser bug above; the real fix is a worker.
+- **The asset tree lists elements but cannot show the USD's own semantics** — no
+  `GlobalId` reaches the browser, so an element row is a prim path, not an IFC
+  identity.
