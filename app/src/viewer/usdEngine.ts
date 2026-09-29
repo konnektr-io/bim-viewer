@@ -123,6 +123,30 @@ const USE_AUTHORED_LIGHTS = true;
  */
 const AUTHORED_LIGHT_INTENSITY_CAP = 30;
 
+/**
+ * The sky's colours and strength, and why this is a gradient rather than
+ * `RoomEnvironment`.
+ *
+ * Measured on this scene, black faces as a share of MODEL pixels (the earlier
+ * probes that reported 0.00% were filtering the dark viewport background as
+ * though it were model — see the note in the comment at the assignment):
+ *
+ *   no environment        black 3.25-35.62%   sat 0.00%
+ *   RoomEnvironment 0.55  black 3.25-29.60%   sat 15.01%   <- worse: it blows out
+ *   sky gradient          (see the verification in the README)
+ *
+ * The dark faces are not a lighting-DIRECTION problem: 52.6% of the 1450 meshes
+ * face away from every directional light, and a further 19.2% have a very dark
+ * base colour (the bathroom's `212124` bodies have a base luminance of 0.016), so
+ * whatever light they do receive rounds to black. Raising the directional or
+ * hemisphere intensity cannot fix that — it brightens the already-lit faces and
+ * blows them out instead. Only direction-INDEPENDENT light can, which is what an
+ * environment map is for.
+ */
+const SKY_COLOR = 0xbfd0e6;
+const GROUND_COLOR = 0x4a5058;
+const ENVIRONMENT_INTENSITY = 1.6;
+
 export class UsdEngine {
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
@@ -141,6 +165,13 @@ export class UsdEngine {
    * removed) so their values stay inspectable and a toggle could restore them.
    */
   private authoredLights: THREE.Light[] = [];
+  /**
+   * The prefiltered sky, held so the composer's materials can be given it AFTER
+   * they exist. `scene.environment` alone is not enough: three.js binds it when a
+   * material is first rendered, and the composer creates its materials during
+   * `parse()`, before this is assigned.
+   */
+  private skyEnvironment: THREE.Texture | null = null;
   private manifest: UsdManifest | null = null;
   private bounds: THREE.Box3 | null = null;
   /** Unfiltered union, diagnostics only. */
@@ -229,14 +260,86 @@ export class UsdEngine {
     // A neutral rig for reading geometry: a hemisphere for ambient shape, a key
     // for form, a weak fill so the shadow side is not black.
     //
-    // With the authored rig restored these are a BASE FILL, not the key: the
-    // authored lights only reach the bathroom, so the exterior needs its own.
-    // Measured at ACES exposure 1.0: luma 140, 0.00% saturated, 0.00% black.
-    scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3f46, 1.0));
-    const key = new THREE.DirectionalLight(0xffffff, 1.5);
+    // THE BLACK FACES — and why an environment light is the fix.
+    //
+    // Measured on this scene: **52.6% of the 1450 meshes face away from every
+    // directional light**, and `scene.environment` was `None`. A face like that
+    // receives only the hemisphere term, which for a downward- or side-facing
+    // surface is close to the ground colour, so it renders near-black. On top of
+    // that, 19.2% of meshes have a very dark base colour (the bathroom's
+    // `212124` bodies have a base luminance of 0.016), so any weak lighting shows
+    // as pure black rather than as a dark shade.
+    //
+    // Raising the ambient or the directional intensities does not fix this — it
+    // brightens the already-lit faces and blows them out while the away-facing
+    // ones stay black. An environment light is the right tool: it is
+    // **direction-independent**, so a surface gets lit from every orientation,
+    // and it gives `MeshStandardMaterial`/`MeshPhysicalMaterial` the indirect
+    // diffuse the authored scene assumes but the viewer had none of.
+    //
+    // `RoomEnvironment` is generated, not a downloaded HDR, so this costs no
+    // network request and no asset. It is an approximation of a neutral studio
+    // and is set on `scene.environment` with an intensity that the measurement
+    // below pins down — deliberately NOT on `scene.background`, so the dark
+    // viewport background stays and the model does not.
+    //
+    // A GRADIENT, not `RoomEnvironment`.
+    //
+    // `RoomEnvironment` was the obvious choice and it is wrong here: it is built
+    // from emissive-white area lights (see three.js `createAreaLightMaterial`,
+    // `emissiveIntensity`), so it measures at 15.01% saturated pixels — it
+    // reintroduces the blowout from a different direction. Measured against it:
+    // black 3.25-29.60%, sat 15.01%.
+    //
+    // What a real scene wants is a SOFT SKY: bright from above, dark from below.
+    // A vertical gradient encodes exactly that, costs nothing, and its two
+    // intensities are the only tuning knobs. Built through PMREM because
+    // `scene.environment` needs a prefiltered cube.
+    const skyScene = new THREE.Scene();
+    const skyGeo = new THREE.SphereGeometry(1, 32, 16);
+    // vertexColors on a BackSide sphere: +Y = sky, -Y = ground
+    const colors: number[] = [];
+    const pos = skyGeo.getAttribute("position");
+    const top = new THREE.Color(SKY_COLOR);
+    const bottom = new THREE.Color(GROUND_COLOR);
+    for (let i = 0; i < pos.count; i += 1) {
+      const t = (pos.getY(i) + 1) / 2; // 0 at the nadir, 1 at the zenith
+      const c = bottom.clone().lerp(top, t * t);
+      colors.push(c.r, c.g, c.b);
+    }
+    skyGeo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    const skyMat = new THREE.MeshBasicMaterial({
+      side: THREE.BackSide,
+      vertexColors: true,
+      toneMapped: false,
+    });
+    const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+    skyScene.add(skyMesh);
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const environment = pmrem.fromScene(skyScene, 0.02);
+    scene.environment = environment.texture;
+    scene.environmentIntensity = ENVIRONMENT_INTENSITY;
+    // Held so the materials the composer creates during parse() can be given it
+    // explicitly — see the note where they are bound.
+    this.skyEnvironment = environment.texture;
+    skyGeo.dispose();
+    skyMat.dispose();
+    pmrem.dispose();
+
+    // A weak hemisphere alongside the gradient. Measured: with the gradient
+    // alone the frame sat at luma 20-22.5 with black up to 57% — a
+    // MeshBasicMaterial sky through PMREM arrives at its own radiance, which is
+    // not enough to lift a 0.016 base-colour surface off zero. The hemisphere is
+    // the flat ambient term; the gradient supplies the directional variation.
+    scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x4a5058, 0.9));
+
+    // Key and fill, kept subtle. With the environment doing the ambient work,
+    // these only need to shape the form.
+    const key = new THREE.DirectionalLight(0xffffff, 1.1);
     key.position.set(1, 2, 1.4);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0xdfe4ea, 0.35);
+    const fill = new THREE.DirectionalLight(0xdfe4ea, 0.3);
     fill.position.set(-1.2, 0.6, -0.8);
     scene.add(fill);
 
@@ -300,6 +403,24 @@ export class UsdEngine {
 
     this.rootGroup = group;
     scene.add(group);
+
+    // NOW apply the environment. `scene.environment` reaches a material when it
+    // is first rendered, and the USD composer creates its own
+    // `MeshPhysicalMaterial` instances during `parse()` — so setting the
+    // environment before the load leaves every one of them with `envMap === null`
+    // and the whole thing has no effect. Measured: `withEnv: 0` of 1450 meshes
+    // when set early.
+    group.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const material = mesh.material as THREE.MeshStandardMaterial | undefined;
+      if (material && "envMap" in material && !material.envMap) {
+        material.envMap = this.skyEnvironment;
+        material.envMapIntensity = 1.0;
+        material.needsUpdate = true;
+      }
+    });
+
     this.measureBounds();
     this.fitCamera();
 
@@ -503,7 +624,10 @@ export class UsdEngine {
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObjects(this.meshes, false);
+      // `pickables()`, not `meshes`: the section plane clips in the shader, so a
+      // clipped-away mesh is still a raycast hit and would be selectable while
+      // invisible.
+      const hits = raycaster.intersectObjects(this.pickables(), false);
       this.clearHighlight();
       const hit = hits[0];
       if (!hit) {
@@ -595,6 +719,57 @@ export class UsdEngine {
   /** The live renderer, for the headless diagnostics only. */
   get rendererForDiag(): THREE.WebGLRenderer | null {
     return this.renderer;
+  }
+
+  /** True when a mesh is non-indexed, so a probe knows the vertex layout. */
+  get geometryStats(): { meshes: number; indexed: number; nonIndexed: number; withNormals: number } {
+    let indexed = 0, nonIndexed = 0, withNormals = 0, meshes = 0;
+    this.meshes.forEach((m) => {
+      meshes += 1;
+      if (m.geometry.index) indexed += 1;
+      else nonIndexed += 1;
+      const n = m.geometry.getAttribute('normal');
+      if (n && n.count) withNormals += 1;
+    });
+    return { meshes, indexed, nonIndexed, withNormals };
+  }
+
+  /** The live camera, so a probe can orbit without synthesising input events. */
+  get __cameraForDiag(): THREE.PerspectiveCamera | null {
+    return this.camera;
+  }
+
+  /**
+   * How many meshes the raycaster would treat as pickable.
+   *
+   * `raycaster.intersectObjects` does NOT know about `material.clippingPlanes`:
+   * a shader-clipped mesh is still submitted and still hit, so the section plane
+   * hides geometry WITHOUT removing it from picking. That is why a click can
+   * select a roof the user has just cut away. `pickables()` is the honest list,
+   * and picking uses it.
+   */
+  get pickableCount(): number {
+    return this.pickables().length;
+  }
+
+  /** Meshes a raycast can legitimately hit, i.e. not shader-clipped away. */
+  private pickables(): THREE.Mesh[] {
+    if (!this.sectionPlane?.isApplied) return this.meshes;
+    const plane = this.sectionPlane.plane;
+    const out: THREE.Mesh[] = [];
+    const target = new THREE.Vector3();
+    for (const mesh of this.meshes) {
+      if (!mesh.visible) continue;
+      if (!mesh.geometry?.boundingBox) mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry?.boundingBox;
+      if (!box || box.isEmpty()) continue;
+      // Cheap accept/reject: if the box's nearest point is on the kept side of
+      // the plane, some of this mesh survives, so keep it pickable.
+      box.getCenter(target);
+      if (plane.distanceToPoint(target) < 0) continue;
+      out.push(mesh);
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- public
