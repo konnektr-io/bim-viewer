@@ -738,6 +738,11 @@ export class UsdEngine {
     return { meshes, indexed, nonIndexed, withNormals };
   }
 
+  /** Exposed so a probe can raycast without importing three itself. */
+  get __threeForRaycast(): typeof THREE {
+    return THREE;
+  }
+
   /** The live camera, so a probe can orbit without synthesising input events. */
   get __cameraForDiag(): THREE.PerspectiveCamera | null {
     return this.camera;
