@@ -187,11 +187,25 @@ def client_config() -> dict[str, str]:
 # here — the same arrangement as the IFC, so no S3 key ever reaches the browser
 # and no derived geometry is baked into an image.
 #
+# WHY A USDZ PACKAGE AND NOT THE PLAIN FLATTEN
+# --------------------------------------------
+# `USDLoader` populates its `assets` map ONLY from a `.usdz` package. On a
+# standalone ASCII layer it composes with an empty assets dict, so
+# `USDComposer._loadTexture` finds nothing and every `UsdUVTexture` silently
+# falls back to a flat scalar colour. The package
+# (`cad/package_web_usdz.py`, manifest key `packageFile`) carries the flattened
+# layer FIRST plus its PNGs, so the shower-head PBR maps actually reach the
+# browser. The plain gzipped flatten stays available at `/api/usd/scene` as the
+# revertible fallback.
+#
 # ASCII and not .usdc on purpose: `USDCParser._readInlinedValue` has no case for
 # the `double` vector variants, so a `double3` decodes as a raw uint32 (142 of
 # 1378 xformOp:translate attributes on this model) and `applyTransform` throws.
-# The ASCII parser decodes them correctly, and gzip -9 takes it from 31.9 MB to
-# 4.9 MB on the wire.
+# The ASCII parser decodes them correctly. This still applies to the packaged
+# root layer, which is the same ASCII flatten. The package itself is served
+# UNCOMPRESSED (`application/octet-stream`, never gzip): the loader's first
+# check is `bytes[0]===0x50 && bytes[1]===0x4B`, and a gzipped body fails it
+# and silently falls through to the ASCII path.
 #
 #   S3_USD_PREFIX  key prefix holding the flattened scene   (optional)
 #
@@ -274,11 +288,17 @@ async def _s3_stream(key: str) -> Response:
         )
 
     out_headers: dict[str, str] = {
-        "content-type": "text/plain",
         "cache-control": "public, max-age=3600, must-revalidate",
     }
-    if key.endswith(".gz"):
-        out_headers["content-encoding"] = "gzip"
+    if key.endswith(".usdz"):
+        # The package must arrive byte-identical: the loader's first check is
+        # bytes[0]===0x50 && bytes[1]===0x4B, and any content-encoding fails it
+        # and silently falls through to the ASCII path.
+        out_headers["content-type"] = "application/octet-stream"
+    else:
+        out_headers["content-type"] = "text/plain"
+        if key.endswith(".gz"):
+            out_headers["content-encoding"] = "gzip"
     for header in ("content-length", "etag", "last-modified"):
         if header in upstream.headers:
             out_headers[header] = upstream.headers[header]
@@ -350,6 +370,24 @@ async def usd_scene() -> Response:
     name = manifest.get("file")
     if not isinstance(name, str) or not name:
         log.error("USD manifest has no usable `file` key")
+        raise HTTPException(status_code=503, detail="usd manifest broken")
+    return await _s3_stream(_usd_key(name))
+
+
+@app.get("/api/usd/scene.usdz")
+async def usd_scene_package() -> Response:
+    """Stream the USDZ package (flattened layer + textures).
+
+    Additive alongside `/api/usd/scene`, which stays as the revertible
+    fallback. The file name comes from the manifest's `packageFile`, falling
+    back to `file` if a rebuild has not packaged yet. Served uncompressed as
+    `application/octet-stream` — never gzip — so the loader's PK-magic check
+    sees the real zip bytes.
+    """
+    manifest = await _usd_manifest_json()
+    name = manifest.get("packageFile") or manifest.get("file")
+    if not isinstance(name, str) or not name:
+        log.error("USD manifest has no usable `packageFile`/`file` key")
         raise HTTPException(status_code=503, detail="usd manifest broken")
     return await _s3_stream(_usd_key(name))
 
