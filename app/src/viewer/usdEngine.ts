@@ -15,6 +15,18 @@
  * reference, so it renders nothing. `cad/build_web_usd.py` flattens the stack
  * into one self-contained ASCII layer, which is what this loads.
  *
+ * WHY A USDZ PACKAGE AND NOT THE PLAIN FLATTEN
+ * --------------------------------------------
+ * `USDLoader` populates its `assets` map ONLY from a `.usdz` package. On a
+ * standalone file it composes with an empty assets dict, so
+ * `USDComposer._loadTexture` finds nothing and every `UsdUVTexture` silently
+ * falls back to a flat scalar colour. `cad/package_web_usdz.py` packs the
+ * flatten (first entry, per the USDZ rule) plus its PNGs, and this fetches
+ * `/api/usd/scene.usdz` as an ArrayBuffer parsed with basePath `""`.
+ * The composer additionally requires `inputs:file` on each `UsdUVTexture`
+ * (`_getTextureFromConnection` returns null without it); the packager authors
+ * it, mirroring the existing `info:default:sourceAsset`.
+ *
  * WHY ASCII AND NOT .usdc
  * -----------------------
  * `USDCParser._readInlinedValue` handles Vec2f/Vec3f/Vec4f but not the `double`
@@ -388,22 +400,37 @@ export class UsdEngine {
     const scene = this.scene;
     if (!scene) throw new Error("Scene not initialised");
 
-    this.callbacks.onProgress?.("Fetching the flattened USD layer…");
-    const res = await fetch("/api/usd/scene");
+    this.callbacks.onProgress?.("Fetching the USDZ package…");
+    const res = await fetch("/api/usd/scene.usdz");
     if (!res.ok) {
       throw new Error(`Failed to fetch the USD scene: HTTP ${res.status}`);
     }
-    const text = await res.text();
+    const buf = await res.arrayBuffer(); // NOT .text() — the PK check needs bytes
+    // The SPA fallback answers unknown /api paths with HTTP 200 + HTML, which
+    // reads as false success. Verify the bytes, not just res.ok.
+    const magic = new Uint8Array(buf.slice(0, 2));
+    if (magic[0] !== 0x50 || magic[1] !== 0x4b) {
+      throw new Error(
+        `The USD scene is not a USDZ package (first bytes ` +
+          `${magic[0]?.toString(16)} ${magic[1]?.toString(16)}) — refusing to parse`,
+      );
+    }
 
     this.callbacks.onProgress?.(
-      `USD received (${(text.length / 1e6).toFixed(1)} MB) — composing meshes…`,
+      `USDZ received (${(buf.byteLength / 1e6).toFixed(1)} MB) — composing meshes…`,
     );
     const loader = new USDLoader();
-    // The composer is synchronous and heavy (~15 s of parse for a 32 MB ASCII
-    // layer), so yield to the browser first or the status line never paints.
+    // The composer is synchronous and heavy (~15 s of parse for the 39 MB
+    // package), so yield to the browser first or the status line never paints.
     await new Promise((resolve) => setTimeout(resolve, 16));
-    const group = loader.parse(text, "/", undefined, undefined) as THREE.Group;
+    // "" (not "/") for a package: the loader passes the zip's own basePath.
+    const group = loader.parse(buf, "", undefined, undefined) as THREE.Group;
     if (!group) throw new Error("The USD layer composed to nothing");
+
+    // The single most important number in the USDZ change: textures only exist
+    // if the package resolved. Reported BEFORE the environment bind below, so
+    // the sky envMap cannot pollute the count.
+    this.reportTextures(group);
 
     this.rootGroup = group;
     scene.add(group);
@@ -455,6 +482,43 @@ export class UsdEngine {
     // world coordinates, so it is built after the first successful measurement.
     this.sectionPlane = new SectionPlane(scene);
     this.sectionPlane.setBounds(this.bounds);
+  }
+
+  /**
+   * Count the distinct THREE.Texture objects the composer actually created.
+   *
+   * `composer.texturePromises` is internal, so the composed result is
+   * traversed instead. Runs BEFORE the environment bind, so the sky envMap
+   * cannot pollute the count. If this is 0 the USDZ change has not worked,
+   * whatever else passes: the wiring is right but the image bytes never
+   * resolved.
+   *
+   * Colour space needs no logic here, only verification: the composer
+   * hardcodes SRGBColorSpace for `inputs:diffuseColor` and NoColorSpace for
+   * normal/occlusion/roughness/metallic, ignoring the authored
+   * `colorSpace:name` — and the USD opinions are already correct.
+   */
+  private reportTextures(group: THREE.Group): void {
+    const seen = new Map<THREE.Texture, { slot: string; mesh: string }>();
+    group.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
+      const materials = material === undefined ? [] : Array.isArray(material) ? material : [material];
+      for (const entry of materials) {
+        for (const [slot, value] of Object.entries(entry) as [string, unknown][]) {
+          if (slot === "envMap") continue;
+          if (value instanceof THREE.Texture && !seen.has(value)) {
+            seen.set(value, { slot, mesh: mesh.name });
+          }
+        }
+      }
+    });
+    const lines = [...seen.entries()].map(([tex, where]) => {
+      const label = tex.name || (tex.image as { src?: string } | undefined)?.src?.slice(-64) || "(unnamed)";
+      return `  ${label} slot=${where.slot} mesh=${where.mesh} colorSpace=${tex.colorSpace}`;
+    });
+    console.info(`[usd] textures composed: ${seen.size}\n${lines.join("\n")}`);
   }
 
   /**
