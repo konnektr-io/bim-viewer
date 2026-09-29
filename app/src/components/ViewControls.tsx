@@ -1,12 +1,3 @@
-import { Maximize } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
-import { useViewerStore } from "@/store/viewerStore";
-import type { ViewerEngine } from "@/viewer/engine";
-
-const getEngine = (): ViewerEngine | undefined =>
-  (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine;
-
 /**
  * Navigation: frame everything.
  *
@@ -16,33 +7,65 @@ const getEngine = (): ViewerEngine | undefined =>
  * There are deliberately NO view buttons here: the view cube in the viewport's
  * corner does orientation, and a row of text presets to keep in sync with it
  * only added ways for the two to disagree.
+ *
+ * SHARED BY BOTH TABS: the `format` prop picks the store and the engine, and
+ * both engines expose the same `frameAll() / visibleCount / totalCount`.
  */
-export function ViewControls() {
-  const status = useViewerStore((s) => s.status);
-  const setLoading = useViewerStore((s) => s.setLoading);
-  const setError = useViewerStore((s) => s.setError);
-  const setVisibility = useViewerStore((s) => s.setVisibility);
+import { Maximize } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { useUsdStore } from "@/store/usdStore";
+import { useViewerStore } from "@/store/viewerStore";
+import type { ViewerEngine } from "@/viewer/engine";
+import type { UsdEngine } from "@/viewer/usdEngine";
+import type { Format } from "@/viewer/types";
+
+export function ViewControls({ format }: { format: Format }) {
+  const ifcStatus = useViewerStore((s) => s.status);
+  const usdStatus = useUsdStore((s) => s.status);
+  const status = format === "usd" ? usdStatus : ifcStatus;
 
   if (status.state !== "ready") return null;
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
-    const engine = getEngine();
+  const run = async (): Promise<void> => {
+    const usd = format === "usd";
+    const engine = usd
+      ? (window as unknown as { __usdEngine?: UsdEngine }).__usdEngine
+      : (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine;
     if (!engine) return;
-    setLoading(label);
+
+    if (usd) useUsdStore.getState().setLoading("Framing…");
+    else useViewerStore.getState().setLoading("Framing…");
+
     try {
-      await fn();
-      setVisibility(engine.visibleCount, engine.totalCount);
+      await engine.frameAll();
+      if (usd) {
+        useUsdStore.getState().setVisibility(engine.visibleCount, engine.totalCount);
+      } else {
+        useViewerStore.getState().setVisibility(engine.visibleCount, engine.totalCount);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (usd) useUsdStore.getState().setError(message);
+      else useViewerStore.getState().setError(message);
     } finally {
-      // Must always return the status line to `ready`. Leaving it on
-      // "loading" hides the storey list and every other control, because they
-      // are gated on `status.state === "ready"`.
-      useViewerStore.getState().setReady({
-        elementCount: engine.totalCount,
-        storeys: useViewerStore.getState().storeys,
-        rooms: useViewerStore.getState().rooms,
-      });
+      // Always return the status line to `ready`: every other control is gated
+      // on it, so leaving it on "loading" would hide the whole panel.
+      if (usd) {
+        const state = useUsdStore.getState();
+        useUsdStore.getState().setReady({
+          meshCount: engine.totalCount,
+          layers: state.layers,
+          storeys: state.storeys,
+        });
+      } else {
+        const state = useViewerStore.getState();
+        useViewerStore.getState().setReady({
+          elementCount: engine.totalCount,
+          storeys: state.storeys,
+          rooms: state.rooms,
+        });
+      }
     }
   };
 
@@ -51,13 +74,7 @@ export function ViewControls() {
       variant="secondary"
       size="sm"
       className="w-full justify-start"
-      onClick={() =>
-        void run("Framing…", async () => {
-          const engine = getEngine();
-          if (!engine) return;
-          await engine.frameAll();
-        })
-      }
+      onClick={() => void run()}
     >
       <Maximize className="size-4" />
       Frame all
