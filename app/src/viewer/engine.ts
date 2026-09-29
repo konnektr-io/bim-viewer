@@ -417,6 +417,16 @@ export class ViewerEngine {
   // throw once FragmentsManager was disposed underneath it.
   private onControlsUpdate: (() => void) | null = null;
   private onCameraChanged: ((camera: OBC.SimpleCamera) => void) | null = null;
+  /**
+   * Set by dispose() and checked by every async callback.
+   *
+   * A field-level `null` is not enough. The Fragments worker is a separate
+   * thread, so its reply can arrive AFTER dispose() has run, and
+   * `Event.trigger` calls every entry in `handlers` unguarded — an undefined
+   * entry there surfaces as "handler is not a function", which is a different
+   * error from the one this whole change set started with.
+   */
+  private disposed = false;
 
   // Plain field, not a constructor parameter property: `erasableSyntaxOnly`
   // (inherited from the graph-explorer tsconfig) forbids emit-only syntax.
@@ -427,6 +437,7 @@ export class ViewerEngine {
   }
 
   async load(container: HTMLElement): Promise<void> {
+    this.disposed = false;
     try {
       await this.initWorld(container);
       await this.initFragments();
@@ -492,7 +503,7 @@ export class ViewerEngine {
     // getter that throws rather than returning null, so every one of these
     // callbacks must be guarded as well as detachable.
     this.onControlsUpdate = () => {
-      if (!fragments.initialized) return;
+      if (this.disposed || !fragments.initialized) return;
       fragments.core.update();
     };
     if (controls) {
@@ -501,14 +512,14 @@ export class ViewerEngine {
     const cameraThree = world.camera.three;
 
     this.onCameraChanged = (camera) => {
-      if (!fragments.initialized) return;
+      if (this.disposed || !fragments.initialized) return;
       for (const [, m] of fragments.list) m.useCamera(camera.three);
       fragments.core.update(true);
     };
     world.onCameraChanged.add(this.onCameraChanged);
 
     fragments.list.onItemSet.add(({ value: model }) => {
-      if (!fragments.initialized) return;
+      if (this.disposed || !fragments.initialized) return;
       model.useCamera(cameraThree);
       world.scene.three.add(model.object);
       fragments.core.update(true);
@@ -1298,6 +1309,10 @@ export class ViewerEngine {
    * afterwards is what makes a stray late callback harmless.
    */
   dispose(): void {
+    // First, and before anything else: late worker replies and any in-flight
+    // camera event must become no-ops the instant teardown starts.
+    this.disposed = true;
+
     // Detach anything that reaches into `fragments` on a camera/controls event.
     const controls = this.world?.camera.controls as unknown as {
       removeEventListener?: (type: string, fn: () => void) => void;
@@ -1308,10 +1323,28 @@ export class ViewerEngine {
     if (this.onCameraChanged) {
       this.world?.onCameraChanged.remove(this.onCameraChanged);
     }
-    this.world?.scene.three.clear();
-
     this.onControlsUpdate = null;
     this.onCameraChanged = null;
+
+    // Stop the fragments updater BEFORE disposing. The library's own
+    // `dispose()` drops the model but leaves the worker's update timer running,
+    // so a tick already queued against the deleted model lands afterwards and
+    // throws "Fragments: Model not found" from inside the worker — an error we
+    // cannot catch from this thread. `initialized` is the guard: it is false
+    // only after dispose, so this is safe to touch before the call.
+    try {
+      // `controllerManager` is not on the public FragmentsModels type, so reach
+      // it structurally and treat its absence as "nothing to stop".
+      const core = this.fragments?.initialized ? this.fragments.core : null;
+      const updater = (
+        core as unknown as {
+          controllerManager?: { updater?: { stop?: () => void } };
+        }
+      )?.controllerManager?.updater;
+      updater?.stop?.();
+    } catch {
+      // The core is already gone; nothing left to stop.
+    }
 
     this.components?.dispose?.();
     this.components = null;
