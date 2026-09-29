@@ -412,6 +412,12 @@ export class ViewerEngine {
   /** Model slug + title, fetched from the backend so nothing is hardcoded here. */
   private config: ModelConfig | null = null;
 
+  // The camera/controls listeners, held as FIELDS so dispose() can detach them.
+  // An inline arrow cannot be removed later, which is what made the tab switch
+  // throw once FragmentsManager was disposed underneath it.
+  private onControlsUpdate: (() => void) | null = null;
+  private onCameraChanged: ((camera: OBC.SimpleCamera) => void) | null = null;
+
   // Plain field, not a constructor parameter property: `erasableSyntaxOnly`
   // (inherited from the graph-explorer tsconfig) forbids emit-only syntax.
   private readonly callbacks: EngineCallbacks;
@@ -482,17 +488,27 @@ export class ViewerEngine {
 
     // SimpleCamera.controls is typed as optional on the base camera.
     const controls = world.camera.controls;
+    // `fragments.initialized` is false once dispose() has run; `core` is a
+    // getter that throws rather than returning null, so every one of these
+    // callbacks must be guarded as well as detachable.
+    this.onControlsUpdate = () => {
+      if (!fragments.initialized) return;
+      fragments.core.update();
+    };
     if (controls) {
-      controls.addEventListener("update", () => fragments.core.update());
+      controls.addEventListener("update", this.onControlsUpdate);
     }
     const cameraThree = world.camera.three;
 
-    world.onCameraChanged.add((camera) => {
+    this.onCameraChanged = (camera) => {
+      if (!fragments.initialized) return;
       for (const [, m] of fragments.list) m.useCamera(camera.three);
       fragments.core.update(true);
-    });
+    };
+    world.onCameraChanged.add(this.onCameraChanged);
 
     fragments.list.onItemSet.add(({ value: model }) => {
+      if (!fragments.initialized) return;
       model.useCamera(cameraThree);
       world.scene.three.add(model.object);
       fragments.core.update(true);
@@ -1265,7 +1281,38 @@ export class ViewerEngine {
     };
   }
 
+  /**
+   * Tear the world down.
+   *
+   * ORDER MATTERS, and getting it wrong throws
+   * "FragmentsManager not initialized. Call init() first." on every tab switch.
+   *
+   * `components.dispose()` disposes the FragmentsManager, which drops its
+   * internal `_core`. But the camera's `update` listener registered in
+   * `initFragments` survives that — and camera-controls keeps firing `update`
+   * every frame, so each one calls `fragments.core.update()` on a manager whose
+   * `_core` is gone. `core` is a getter that THROWS rather than returning null,
+   * which is why it surfaces as a console error instead of a no-op.
+   *
+   * So: detach the camera listeners FIRST, then dispose. Nulling the fields
+   * afterwards is what makes a stray late callback harmless.
+   */
   dispose(): void {
+    // Detach anything that reaches into `fragments` on a camera/controls event.
+    const controls = this.world?.camera.controls as unknown as {
+      removeEventListener?: (type: string, fn: () => void) => void;
+    } | undefined;
+    if (controls?.removeEventListener && this.onControlsUpdate) {
+      controls.removeEventListener("update", this.onControlsUpdate);
+    }
+    if (this.onCameraChanged) {
+      this.world?.onCameraChanged.remove(this.onCameraChanged);
+    }
+    this.world?.scene.three.clear();
+
+    this.onControlsUpdate = null;
+    this.onCameraChanged = null;
+
     this.components?.dispose?.();
     this.components = null;
     this.fragments = null;
