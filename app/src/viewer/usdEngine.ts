@@ -74,6 +74,18 @@ interface UsdUserData {
 const userDataOf = (object: THREE.Object3D): UsdUserData =>
   object.userData as UsdUserData;
 
+/**
+ * Use the lights the scene was AUTHORED with instead of the neutral rig.
+ *
+ * Off by default, and the reason is worth keeping: this scene carries 6
+ * `UsdLuxRectLight` + a `DomeLight` from its Blender origin, and the composer
+ * instantiates them at intensities 17.5 and 286.5. Those numbers are fine for
+ * an offline render with a proper exposure, and ruinous in a viewer whose job
+ * is to make geometry legible. The authored rig is therefore suppressed by
+ * default and kept in the scene (not deleted) so it can be brought back.
+ */
+const USE_AUTHORED_LIGHTS = false;
+
 export class UsdEngine {
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
@@ -87,6 +99,11 @@ export class UsdEngine {
   /** prim path -> mesh, so a pick resolves to its attributes in O(1). */
   private byPath = new Map<string, THREE.Mesh>();
   private rootGroup: THREE.Group | null = null;
+  /**
+   * Lights the scene was authored with, suppressed by default. Kept (not
+   * removed) so their values stay inspectable and a toggle could restore them.
+   */
+  private authoredLights: THREE.Light[] = [];
   private manifest: UsdManifest | null = null;
   private bounds: THREE.Box3 | null = null;
   /** Unfiltered union, diagnostics only. */
@@ -153,15 +170,39 @@ export class UsdEngine {
     controls.dampingFactor = 0.1;
     this.controls = controls;
 
-    // Ambient + two directional lights, matching the IFC view's flat readability
-    // rather than chasing a physically-based look.
-    scene.add(new THREE.AmbientLight(0xffffff, 1.6));
-    const key = new THREE.DirectionalLight(0xffffff, 1.1);
+    // LIGHTING — the white blowout had TWO causes, and the second was the
+    // bigger one.
+    //
+    // (1) This scene was authored with its OWN lights: 6 `UsdLuxRectLight` plus a
+    //     `DomeLight` (confirmed with pxr). The USD composer instantiates them
+    //     as three.js lights, and their intensities arrive as 17.5 and 286.5 —
+    //     the 286 one alone dwarfs everything else in the scene. So the viewport
+    //     was carrying a lighting rig I never added, at values that saturate
+    //     every surface facing them.
+    //
+    // (2) On top of that, ambient 1.6 + two directionals with NO tone mapping.
+    //
+    // The decision: the authored rig is for RENDERING (a Blender-lit interior
+    // look), not for a viewer that needs to read geometry. So it is switched off
+    // by default and replaced with a neutral three-point rig. It stays in the
+    // scene — a toggle could bring it back — because deleting prims the model
+    // author put there is not this viewer's call.
+    //
+    // Set USE_AUTHORED_LIGHTS = true to see the scene as it renders instead.
+    // A neutral rig for reading geometry: a hemisphere for ambient shape, a key
+    // for form, a weak fill so the shadow side is not black.
+    scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3f46, 1.0));
+    const key = new THREE.DirectionalLight(0xffffff, 1.5);
     key.position.set(1, 2, 1.4);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.5);
+    const fill = new THREE.DirectionalLight(0xdfe4ea, 0.35);
     fill.position.set(-1.2, 0.6, -0.8);
     scene.add(fill);
+
+    // Without this the sum clips to white. Exposure stays 1.0 so the tone curve,
+    // not the intensity, does the work.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
 
     const cube = new ViewCube({
       size: 128,
@@ -220,6 +261,28 @@ export class UsdEngine {
     scene.add(group);
     this.measureBounds();
     this.fitCamera();
+
+    // Suppress the authored lighting rig NOW that the group exists (see
+    // USE_AUTHORED_LIGHTS). `visible = false` keeps the prim and its values; it
+    // only removes the light from the render list.
+    const authored: THREE.Light[] = [];
+    group.traverse((obj) => {
+      const light = obj as THREE.Light;
+      if (light.isLight) authored.push(light);
+    });
+    for (const light of authored) {
+      if (USE_AUTHORED_LIGHTS) {
+        light.visible = true;
+      } else {
+        light.visible = false;
+      }
+      this.authoredLights.push(light);
+    }
+    if (authored.length) {
+      console.info(
+        `[usd] suppressed ${authored.length} authored light(s); using the neutral rig instead`,
+      );
+    }
 
     // The shared SectionPlane needs the real bounds to map its 0..1 offset onto
     // world coordinates, so it is built after the first successful measurement.
@@ -617,6 +680,14 @@ export class UsdEngine {
       storeys: this.manifest?.storeys ?? [],
       activeStorey: this.activeStorey,
       viewCubeMounted: this.viewCube !== null,
+      /** Authored lights found and whether they are suppressed. */
+      authoredLights: {
+        count: this.authoredLights.length,
+        suppressed: this.authoredLights.filter((l) => !l.visible).length,
+        intensities: this.authoredLights.map((l) => +l.intensity.toFixed(1)),
+      },
+      toneMapping: this.renderer?.toneMapping ?? null,
+      exposure: this.renderer?.toneMappingExposure ?? null,
       sectionReady: this.sectionPlane !== null,
       sectionApplied: this.sectionPlane?.isApplied ?? false,
       /** Materials that currently carry a clipping plane — proves the cut landed. */
