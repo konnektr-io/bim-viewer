@@ -42,6 +42,7 @@ import { FACE_DIRECTIONS, ViewCube, type CubeFace } from "./viewCube";
 import { SectionPlane, type SectionState } from "./sectionPlane";
 import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
 import type { UsdLayer, UsdManifest, UsdPrimInfo, UsdIfcPathInfo } from "./usdTypes";
+import type { AssetNode } from "@/components/AssetTree";
 
 export type { ViewPreset };
 
@@ -181,6 +182,9 @@ export class UsdEngine {
   private lastSelection: UsdPrimInfo | null = null;
   private activeLayers = new Set<string>();
   private activeStorey: string | null = null;
+  /** Set by `selectNode`; narrows visibility to one tree node. */
+  private isolateTo: ((mesh: THREE.Mesh) => boolean) | null = null;
+  private isolatedNode: string | null = null;
   private frameHandle = 0;
 
   private readonly callbacks: UsdEngineCallbacks;
@@ -688,7 +692,7 @@ export class UsdEngine {
       const usd = userDataOf(mesh);
       const layerOk = this.activeLayers.size === 0 || this.activeLayers.has(usd.rootPrim ?? "");
       const storeyOk = this.activeStorey === null || usd.ifc?.storey === this.activeStorey;
-      const on = layerOk && storeyOk;
+      const on = layerOk && storeyOk && (!this.isolateTo || this.isolateTo(mesh));
       mesh.visible = on;
       if (on) visible += 1;
     }
@@ -750,6 +754,149 @@ export class UsdEngine {
    */
   get pickableCount(): number {
     return this.pickables().length;
+  }
+
+  /**
+   * The model as a browsable tree.
+   *
+   * Built from the prim paths already recorded in `indexPrims`, grouped by the
+   * storey and IFC-category path segments. That grouping is not in the flattened
+   * file any more — the manifest carries the counts, but not the parent/child
+   * shape — so it is reconstructed here from the paths, which is the only place
+   * the hierarchy still exists.
+   *
+   * Structure: layer (root prim) -> storey -> category -> element, with rooms
+   * inserted under the storey where the path carries one. A root prim that is
+   * not IFC (the bathroom) gets a single synthetic storey so it is still
+   * browsable.
+   */
+  buildTree(): AssetNode[] {
+    const layerOf = new Map<string, AssetNode>();
+    const byStorey = new Map<string, Map<string, AssetNode>>();
+
+    for (const mesh of this.meshes) {
+      const usd = userDataOf(mesh);
+      const path = usd.usdPath;
+      if (!path) continue;
+      const root = usd.rootPrim ?? "House";
+      const ifc = usd.ifc ?? describeIfcPath(path);
+
+      let layer = layerOf.get(root);
+      if (!layer) {
+        layer = { id: root, label: root, kind: "layer", count: 0 };
+        layerOf.set(root, layer);
+        byStorey.set(root, new Map());
+      }
+      layer.count += 1;
+
+      const storeyKey = `${root}/${ifc.storey ?? "(other)"}`;
+      let storeys = byStorey.get(root);
+      if (!storeys) {
+        storeys = new Map();
+        byStorey.set(root, storeys);
+      }
+      let storey = storeys.get(ifc.storey ?? "(other)");
+      if (!storey) {
+        storey = {
+          id: storeyKey,
+          label: ifc.storey ?? "(other)",
+          kind: "storey",
+          count: 0,
+          children: [],
+        };
+        storeys.set(ifc.storey ?? "(other)", storey);
+      }
+      storey.count += 1;
+
+      // `catKey` already includes the storey, so it is unique per storey. The
+      // dedup counter was global, which suffixed the SAME category on a second
+      // storey (`IFCWALL`, `IFCWALL#1`, …) instead of finding the existing
+      // node — measured as 708 `category` rows under one storey where there are
+      // only 16 categories in the model.
+      const catId = `${storeyKey}/${ifc.category ?? "Mesh"}`;
+      void catId;
+
+      let category = storey.children?.find((c) => c.id === catId);
+      if (!category) {
+        category = {
+          id: catId,
+          label: ifc.category ?? "Mesh",
+          kind: "category",
+          count: 0,
+          children: [],
+        };
+        storey.children?.push(category);
+      }
+      category.count += 1;
+      category.children?.push({
+        id: path,
+        label: ifc.element ?? mesh.name ?? path,
+        kind: "element",
+        count: 1,
+      });
+    }
+
+    const roots: AssetNode[] = [];
+    for (const [root, layer] of layerOf) {
+      const storeys = byStorey.get(root);
+      layer.children = storeys ? [...storeys.values()] : [];
+      // Largest first: the storeys you look at are the big ones.
+      layer.children.sort((a, b) => b.count - a.count);
+      for (const s of layer.children) {
+        s.children?.sort((a, b) => b.count - a.count);
+      }
+      roots.push(layer);
+    }
+    roots.sort((a, b) => b.count - a.count);
+    return roots;
+  }
+
+  /**
+   * Isolate a tree node.
+   *
+   * Resolves the node's id back to the meshes under it. `element` ids are prim
+   * paths (exact), `category` ids are storey+category, `storey`/`layer` are
+   * prefixes — so one predicate covers every level, and it is applied to the same
+   * `userData` the picking already uses rather than to a second index.
+   */
+  async selectNode(node: AssetNode): Promise<{ visible: number; total: number }> {
+    if (node.kind === "element") {
+      this.isolateTo = (mesh) => userDataOf(mesh).usdPath === node.id;
+    } else if (node.kind === "category") {
+      const [layer, storey, category] = node.id.split("/");
+      this.isolateTo = (mesh) => {
+        const usd = userDataOf(mesh);
+        const ifc = usd.ifc ?? describeIfcPath(usd.usdPath ?? "");
+        return (
+          (usd.rootPrim === layer || !layer) &&
+          (ifc.storey === storey || !storey) &&
+          (ifc.category === category || !category)
+        );
+      };
+    } else if (node.kind === "storey") {
+      const [layer, storey] = node.id.split("/");
+      this.isolateTo = (mesh) => {
+        const usd = userDataOf(mesh);
+        const ifc = usd.ifc ?? describeIfcPath(usd.usdPath ?? "");
+        return (usd.rootPrim === layer || !layer) && (ifc.storey === storey || !storey);
+      };
+    } else {
+      // layer
+      this.isolateTo = (mesh) => userDataOf(mesh).rootPrim === node.id;
+    }
+    this.isolatedNode = node.id;
+    return this.applyFilters();
+  }
+
+  /** Clear an isolation and go back to the layer/storey filters alone. */
+  async clearIsolation(): Promise<{ visible: number; total: number }> {
+    this.isolateTo = null;
+    this.isolatedNode = null;
+    return this.applyFilters();
+  }
+
+  get isolatedNodeId(): string | null {
+    return this.isolatedNode;
   }
 
   /** Meshes a raycast can legitimately hit, i.e. not shader-clipped away. */

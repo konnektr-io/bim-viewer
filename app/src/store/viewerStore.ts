@@ -7,6 +7,7 @@
 import { create } from "zustand";
 
 import type { Format, LoadStatus, Room, Selection, Storey } from "@/viewer/types";
+import type { AssetNode } from "@/components/AssetTree";
 import type { ViewPreset } from "@/viewer/viewPresets";
 import {
   DEFAULT_SECTION,
@@ -25,7 +26,11 @@ interface ViewerState {
   visibleCount: number | null;
   totalCount: number | null;
   section: SectionState;
+  tree: AssetNode[];
+  isolatedNodeId: string | null;
 
+  setTree: (tree: AssetNode[]) => void;
+  setIsolatedNode: (id: string | null) => void;
   setFormat: (format: Format) => void;
   setModelTitle: (title: string) => void;
   setLoading: (detail: string) => void;
@@ -55,6 +60,11 @@ export const useViewerStore = create<ViewerState>((set) => ({
   visibleCount: null,
   totalCount: null,
   section: DEFAULT_SECTION,
+  tree: [],
+  isolatedNodeId: null,
+
+  setTree: (tree) => set({ tree }),
+  setIsolatedNode: (isolatedNodeId) => set({ isolatedNodeId }),
 
   setFormat: (format) => set({ format, selection: null }),
 

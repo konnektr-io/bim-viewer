@@ -27,6 +27,7 @@ import { FACE_DIRECTIONS, ViewCube, type CubeFace } from "./viewCube";
 import { SectionPlane, type SectionState } from "./sectionPlane";
 import { CIRCUIT_LABELS } from "./labels";
 import type { ModelConfig } from "./types";
+import type { AssetNode } from "@/components/AssetTree";
 
 export type { ViewPreset };
 
@@ -411,6 +412,10 @@ export class ViewerEngine {
   private boundsTrace: Record<string, unknown> = {};
   /** Model slug + title, fetched from the backend so nothing is hardcoded here. */
   private config: ModelConfig | null = null;
+  /** categoryId -> element ids, filled by buildTree so isolation can reuse it. */
+  private categoryMembers = new Map<string, number[]>();
+  /** The tree node currently isolating visibility, for the UI highlight. */
+  private isolatedNode: string | null = null;
 
   // The camera/controls listeners, held as FIELDS so dispose() can detach them.
   // An inline arrow cannot be removed later, which is what made the tab switch
@@ -427,6 +432,8 @@ export class ViewerEngine {
    * error from the one this whole change set started with.
    */
   private disposed = false;
+  /** The render loop is started once, after Fragments is ready. */
+  private renderLoopStarted = false;
   /** Detaches from `fragments.onBeforeDispose`; see initFragments. */
   private onFragmentsBeforeDispose: (() => void) | null = null;
 
@@ -440,6 +447,7 @@ export class ViewerEngine {
 
   async load(container: HTMLElement): Promise<void> {
     this.disposed = false;
+    this.renderLoopStarted = false;
     try {
       await this.initWorld(container);
       await this.initFragments();
@@ -470,7 +478,15 @@ export class ViewerEngine {
     world.renderer = new OBC.SimpleRenderer(components, container);
     world.camera = new OBC.SimpleCamera(components);
 
-    components.init();
+    // DO NOT start the render loop yet. `components.init()` begins rendering
+    // immediately, and the next step AWAITS the Fragments worker fetch — so
+    // frames would run with the components live but the FragmentsManager's core
+    // absent, and anything touching it in that window throws
+    // "FragmentsManager not initialized. Call init() first." That is exactly
+    // the error a fast tab switch produces, because the switch disposes one
+    // engine and mounts a new one while the worker is still in flight.
+    //
+    // The loop is started in `startRenderLoop()` once Fragments is ready.
 
     // The view cube mirrors the main camera every time the controls update, so
     // it tracks orbiting and panning without a render loop of its own.
@@ -488,6 +504,18 @@ export class ViewerEngine {
     });
   }
 
+  /**
+   * Start the render loop, once and only once.
+   *
+   * Split out of `initWorld` so it can be deferred until FragmentsManager has
+   * its core — see the note at the call site for why the ordering matters.
+   */
+  private startRenderLoop(): void {
+    if (this.renderLoopStarted) return;
+    this.renderLoopStarted = true;
+    this.components?.init();
+  }
+
   private async initFragments(): Promise<void> {
     const { components, world } = this;
     if (!components || !world) throw new Error("World not initialised");
@@ -498,6 +526,8 @@ export class ViewerEngine {
     // The worker must match the installed @thatopen/fragments build; the
     // library resolves that itself. Passing any other URL is a schema mismatch.
     fragments.init(await OBC.FragmentsManager.getWorker());
+    // Fragments is live; only now is it safe to render.
+    this.startRenderLoop();
 
     // Stop the fragments updater BEFORE the core is dropped.
     //
@@ -1115,6 +1145,162 @@ export class ViewerEngine {
   }
 
   // ---------------------------------------------------------------- public
+
+  /**
+   * The model as a browsable tree.
+   *
+   * Built from `getItemsOfCategories`, NOT `getSpatialStructure()`: on this model
+   * the spatial tree stops at the storey level behind a chain of null-category
+   * aggregation nodes, so matching on category against it finds nothing at all —
+   * silently, with no error. `getItemsOfCategories` works and is cheap.
+   *
+   * Structure: storey -> (space -> its contents) plus (category -> elements), so
+   * a room and its fittings are browsable together, and everything not in a named
+   * room still appears under its category.
+   */
+  async buildTree(): Promise<AssetNode[]> {
+    const model = this.model;
+    if (!model) return [];
+
+    // Only the storeys come from the category query: the spaces are already known
+    // from indexing (`roomElements` / `roomNames`), and re-querying them here
+    // would duplicate the source of truth.
+    const byCategory = await model.getItemsOfCategories([/^IFCBUILDINGSTOREY$/]);
+    const storeyIds: number[] = byCategory.IFCBUILDINGSTOREY ?? [];
+
+    // Element -> space, so a room can list what is in it.
+    const spaceChildren = new Map<number, number[]>();
+    for (const [spaceId, kids] of this.roomElements) {
+      spaceChildren.set(spaceId, kids);
+    }
+    const inSpace = new Map<number, number>();
+    for (const [spaceId, kids] of spaceChildren) {
+      for (const kid of kids) inSpace.set(kid, spaceId);
+    }
+
+    // Category of every element, so the leftovers can be grouped.
+    const categories = await model.getItemsOfCategories(
+      [...new Set(this.knownCategories)].map((c) => new RegExp(`^${c}$`)),
+    ).catch(() => ({}) as Record<string, number[]>);
+    const elementCategory = new Map<number, string>();
+    for (const [category, ids] of Object.entries(categories)) {
+      for (const id of ids) elementCategory.set(id, category);
+    }
+
+    const nodes: AssetNode[] = [];
+    for (const storeyId of storeyIds) {
+      const storeyKey = `storey/${storeyId}`;
+      const children: AssetNode[] = [];
+
+      // Rooms on this storey.
+      for (const [spaceId, kids] of spaceChildren) {
+        const spaceName = this.roomNames.get(spaceId) ?? `#${spaceId}`;
+        if (!this.roomIsOnStorey(spaceId, storeyId)) continue;
+        children.push({
+          id: `space/${spaceId}`,
+          label: spaceName,
+          kind: "room",
+          count: kids.length,
+          children: kids.slice(0, 200).map((id) => ({
+            id: `element/${id}`,
+            label: `${elementCategory.get(id) ?? "IFCELEMENT"} #${id}`,
+            kind: "element" as const,
+            count: 1,
+          })),
+        });
+      }
+
+      // Everything on this storey that is not in a named room, by category.
+      const storeyKids = new Set(this.storeyElements.get(storeyId) ?? []);
+      const loose = new Map<string, number[]>();
+      for (const id of storeyKids) {
+        if (inSpace.has(id)) continue;
+        const category = elementCategory.get(id) ?? "IFCELEMENT";
+        const list = loose.get(category) ?? [];
+        list.push(id);
+        loose.set(category, list);
+      }
+      for (const [category, ids] of [...loose.entries()].sort((a, b) => b[1].length - a[1].length)) {
+        this.categoryMembers.set(`category/${storeyId}/${category}`, ids);
+        children.push({
+          id: `category/${storeyId}/${category}`,
+          label: category,
+          kind: "category",
+          count: ids.length,
+          children: ids.slice(0, 200).map((id) => ({
+            id: `element/${id}`,
+            label: `${category} #${id}`,
+            kind: "element" as const,
+            count: 1,
+          })),
+        });
+      }
+
+      nodes.push({
+        id: storeyKey,
+        label: this.storeyNames.get(storeyId) ?? `Storey ${storeyId}`,
+        kind: "storey",
+        count: storeyKids.size,
+        children,
+      });
+    }
+    return nodes;
+  }
+
+  /** Is a space on a given storey? Uses the space element's own containment. */
+  private roomIsOnStorey(spaceId: number, storeyId: number): boolean {
+    const kids = this.roomElements.get(spaceId);
+    if (!kids?.length) return false;
+    // A space is on a storey when the storey contains the space itself, or any of
+    // its contents. The space is not always in the storey's child list, so both
+    // are checked rather than assumed.
+    if ((this.storeyElements.get(storeyId) ?? []).includes(spaceId)) return true;
+    const onStorey = new Set(this.storeyElements.get(storeyId) ?? []);
+    return kids.some((kid) => onStorey.has(kid));
+  }
+
+  /** Categories seen while indexing, for the tree's grouping. */
+  private knownCategories: string[] = ["IFCWALL", "IFCWINDOW", "IFCDOOR", "IFCSLAB", "IFCSTAIR",
+    "IFCRAILING", "IFCCOVERING", "IFCSPACE", "IFCFLOWSEGMENT", "IFCFLOWFITTING",
+    "IFCFLOWTERMINAL", "IFCDISTRIBUTIONCONTROLELEMENT", "IFCLIGHTFIXTURE", "IFCBUILDINGELEMENTPROXY",
+    "IFCMEMBER", "IFCPLATE", "IFCROOF", "IFCCOLUMN", "IFCBEAM", "IFCFURNISHINGELEMENT"];
+
+  /** Isolate a tree node. Mirrors the USD engine's `selectNode`. */
+  async selectNode(node: AssetNode): Promise<{ visible: number; total: number }> {
+    const model = this.model;
+    if (!model) return { visible: 0, total: 0 };
+
+    let ids: number[];
+    if (node.kind === "element") {
+      ids = [Number(node.id.split("/")[1])].filter((n) => Number.isFinite(n));
+    } else if (node.kind === "room") {
+      ids = this.roomElements.get(Number(node.id.split("/")[1])) ?? [];
+    } else if (node.kind === "category") {
+      ids = (this.categoryMembers.get(node.id) ?? []).slice();
+    } else {
+      ids = this.storeyElements.get(Number(node.id.split("/")[1])) ?? [];
+    }
+
+    await model.setVisible(undefined, true);
+    const keep = new Set(ids);
+    const hidden = this.allIds.filter((id) => !keep.has(id));
+    if (hidden.length) await model.setVisible(hidden, false);
+    this.activeStorey = null;
+    this.isolatedNode = node.id;
+    return this.visibility();
+  }
+
+  /** Clear an isolation. */
+  async clearIsolation(): Promise<{ visible: number; total: number }> {
+    const model = this.model;
+    if (model) await model.setVisible(undefined, true);
+    this.isolatedNode = null;
+    return this.visibility();
+  }
+
+  get isolatedNodeId(): string | null {
+    return this.isolatedNode;
+  }
 
   /** Show only one storey. `null` restores the whole model. */
   async setStorey(localId: number | null): Promise<{ visible: number; total: number }> {

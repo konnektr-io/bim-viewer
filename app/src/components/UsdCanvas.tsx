@@ -48,7 +48,15 @@ export function UsdCanvas() {
         /* the header falls back to the default */
       });
 
-    engine.load(container).catch((err) => {
+    engine.load(container).then(() => {
+      // The tree is built from the prim paths recorded during load, so it is
+      // free now and never needs rebuilding.
+      try {
+        useUsdStore.getState().setTree(engine.buildTree());
+      } catch (err) {
+        console.warn("[usd] tree build failed", err);
+      }
+    }).catch((err) => {
       store.setError(err instanceof Error ? err.message : String(err));
     });
 

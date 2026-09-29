@@ -42,7 +42,14 @@ export function ViewerCanvas() {
     // the engine through the tree.
     (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine = engine;
 
-    engine.load(container).catch((err) => {
+    engine.load(container).then(() => {
+      // Built from `getItemsOfCategories`, which is the only spatial query that
+      // works on this model (see ViewerEngine.buildTree).
+      void engine
+        .buildTree()
+        .then((tree) => useViewerStore.getState().setTree(tree))
+        .catch((err) => console.warn("[ifc] tree build failed", err));
+    }).catch((err) => {
       store.setError(err instanceof Error ? err.message : String(err));
     });
 
