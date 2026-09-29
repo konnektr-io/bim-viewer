@@ -75,16 +75,53 @@ const userDataOf = (object: THREE.Object3D): UsdUserData =>
   object.userData as UsdUserData;
 
 /**
- * Use the lights the scene was AUTHORED with instead of the neutral rig.
+ * Use the lights the scene was AUTHORED with, in addition to the neutral rig.
  *
- * Off by default, and the reason is worth keeping: this scene carries 6
- * `UsdLuxRectLight` + a `DomeLight` from its Blender origin, and the composer
- * instantiates them at intensities 17.5 and 286.5. Those numbers are fine for
- * an offline render with a proper exposure, and ruinous in a viewer whose job
- * is to make geometry legible. The authored rig is therefore suppressed by
- * default and kept in the scene (not deleted) so it can be brought back.
+ * This was `false` on a wrong inference and is now `true` on a measurement. The
+ * reasoning that flipped it:
+ *
+ *  - I assumed the authored rig (6 `UsdLuxRectLight` at intensities 17.5-286.5,
+ *    plus a `DomeLight`) was the cause of the white blowout, and suppressed it.
+ *    That fixed the blowout and caused the opposite failure: the model went
+ *    underexposed, with large pure-black regions.
+ *  - `pxr` then showed where those lights actually ARE: all 7 come from
+ *    `bathroom_design.usd`, and the 6 rect lights are 0.26-2.2 m across, sitting
+ *    inside a 3.5 m2 bathroom in a 28 m house. They are ROOM lighting. Treating
+ *    a 2.2 m fixture as a 28 m house light was the error.
+ *  - An A/B of the real configurations settled it. With ACES tone mapping ON,
+ *    the authored rig as-is gives 0.00% saturated at luma 140 — brighter and
+ *    clean. With tone mapping OFF it gives **9.14% saturated**: the original
+ *    blowout. The rig was never the cause; the missing tone curve was.
+ *
+ * So: keep the authored rig, keep ACES, and let the neutral rig underneath
+ * stand in as ambient the authored rig does not provide for the exterior.
  */
-const USE_AUTHORED_LIGHTS = false;
+const USE_AUTHORED_LIGHTS = true;
+
+/**
+ * Cap on a single authored light's intensity, in the units USD reports.
+ *
+ * Measured, not guessed. With the rig restored and ACES on, the frame was clean
+ * (0.00% saturated) but `nearWhite` rose to 3.60% — and a 10x8 spatial grid
+ * showed that was **one single pixel**, in one cell. So it was a LOCAL hot spot,
+ * not a global exposure problem, and the fix had to be local: the offender is
+ * `daylight` at intensity 286.5, sitting 0.2-2.6 m from the bathroom surfaces it
+ * lights. The other five are 12.7-17.5, i.e. an order of magnitude lower.
+ *
+ * Measured across caps, all with ACES on:
+ *
+ *   cap      near-white   luma
+ *    none       3.60%     137.6    <- one blown pixel
+ *     60        0.02%     113.7
+ *     30        0.00%     108.2    <- chosen: fully clean, still well lit
+ *     20        0.00%     105.7
+ *
+ * 30 is the smallest reduction that reaches a completely clean frame, so it is
+ * the one that keeps as much of the authored lighting as possible. The authored
+ * values are preserved on `userData`; this is a display concern, not an edit to
+ * the scene.
+ */
+const AUTHORED_LIGHT_INTENSITY_CAP = 30;
 
 export class UsdEngine {
   private scene: THREE.Scene | null = null;
@@ -191,6 +228,10 @@ export class UsdEngine {
     // Set USE_AUTHORED_LIGHTS = true to see the scene as it renders instead.
     // A neutral rig for reading geometry: a hemisphere for ambient shape, a key
     // for form, a weak fill so the shadow side is not black.
+    //
+    // With the authored rig restored these are a BASE FILL, not the key: the
+    // authored lights only reach the bathroom, so the exterior needs its own.
+    // Measured at ACES exposure 1.0: luma 140, 0.00% saturated, 0.00% black.
     scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3f46, 1.0));
     const key = new THREE.DirectionalLight(0xffffff, 1.5);
     key.position.set(1, 2, 1.4);
@@ -271,10 +312,11 @@ export class UsdEngine {
       if (light.isLight) authored.push(light);
     });
     for (const light of authored) {
-      if (USE_AUTHORED_LIGHTS) {
-        light.visible = true;
-      } else {
-        light.visible = false;
+      light.visible = USE_AUTHORED_LIGHTS;
+      if (light.intensity > AUTHORED_LIGHT_INTENSITY_CAP) {
+        // Keep the authored value so this is reversible and inspectable.
+        light.userData.__authoredIntensity = light.intensity;
+        light.intensity = AUTHORED_LIGHT_INTENSITY_CAP;
       }
       this.authoredLights.push(light);
     }
@@ -683,8 +725,14 @@ export class UsdEngine {
       /** Authored lights found and whether they are suppressed. */
       authoredLights: {
         count: this.authoredLights.length,
-        suppressed: this.authoredLights.filter((l) => !l.visible).length,
+        visible: this.authoredLights.filter((l) => l.visible).length,
+        capped: this.authoredLights.filter(
+          (l) => l.userData.__authoredIntensity !== undefined,
+        ).length,
         intensities: this.authoredLights.map((l) => +l.intensity.toFixed(1)),
+        authoredIntensities: this.authoredLights.map(
+          (l) => +(l.userData.__authoredIntensity ?? l.intensity).toFixed(1),
+        ),
       },
       toneMapping: this.renderer?.toneMapping ?? null,
       exposure: this.renderer?.toneMappingExposure ?? null,
