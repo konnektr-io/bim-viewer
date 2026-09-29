@@ -506,7 +506,7 @@ export class UsdEngine {
       const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
       const materials = material === undefined ? [] : Array.isArray(material) ? material : [material];
       for (const entry of materials) {
-        for (const [slot, value] of Object.entries(entry)) {
+        for (const [slot, value] of Object.entries(entry) as [string, unknown][]) {
           if (slot === "envMap") continue;
           if (value instanceof THREE.Texture && !seen.has(value)) {
             seen.set(value, { slot, mesh: mesh.name });
