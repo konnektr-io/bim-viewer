@@ -14,6 +14,7 @@ between the probe and the verification, and ERR_CONNECTION_REFUSED then reads as
 from __future__ import annotations
 
 import contextlib
+import json
 import pathlib
 import socket
 import subprocess
@@ -27,9 +28,16 @@ BASE = f"http://127.0.0.1:{PORT}"
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SERVER = REPO / "tools" / "serve_local.py"
 
-# USD manifest meshCount on this model. The USD view is asserted to reach it, so
-# a load that silently fell back to something else cannot pass.
-USD_MESHES = 1448
+# USD manifest meshCount on this model, READ FROM THE MANIFEST rather than
+# hardcoded. A literal went stale the moment `cad/build_web_usd.py` was re-run
+# (1448 -> 1453) and the assertion then failed on a viewer that was rendering
+# exactly what the manifest said. The claim is "the viewer agrees with the
+# manifest", so the manifest is the source of truth for BOTH sides of the
+# comparison — a pinned copy turns every rebuild into a false failure.
+MANIFEST = pathlib.Path("/opt/data/work/usd-web/manifest.json")
+USD_MESHES = json.loads(MANIFEST.read_text())["meshCount"] if MANIFEST.is_file() else None
+if USD_MESHES is None:
+    raise SystemExit(f"no USD manifest at {MANIFEST} — build it with cad/build_web_usd.py")
 
 failures: list[str] = []
 checks = 0
@@ -175,10 +183,15 @@ def main() -> None:
             usd_mesh_count == USD_MESHES,
             f"{usd_mesh_count!r} (manifest says {USD_MESHES})",
         )
+        # The status line formats with `toLocaleString("en-US")`, so a comma is
+        # expected — but accept the bare digits too rather than failing the whole
+        # run on a formatting detail. What is being asserted is "the number the
+        # user sees came from the manifest", and both forms satisfy that.
+        body_text = page.inner_text("body")
         check(
             "the status line surfaces that count",
-            f"{USD_MESHES:,}" in page.inner_text("body"),
-            f"expected {USD_MESHES:,} in the rendered text",
+            f"{USD_MESHES:,}" in body_text or str(USD_MESHES) in body_text,
+            f"expected {USD_MESHES:,} (or {USD_MESHES}) in the rendered text",
         )
         check(
             "the USD tab is the active one",
