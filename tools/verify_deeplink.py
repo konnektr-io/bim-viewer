@@ -163,20 +163,22 @@ def main() -> None:
             "the USDZ package was fetched",
             any("/api/usd/scene.usdz" in u for u in requests),
         )
-        # Read the count from the status LINE in the DOM, not from the truncated
-        # `status` string — `wait_ready` cuts at 120 chars, and the "N meshes"
-        # text sits after the tab bar, so it can be cut off entirely. The mesh
-        # count is the claim that the right model composed, so it is worth
-        # reading it whole.
-        usd_line = page.evaluate(
-            "() => [...document.querySelectorAll('div')]"
-            ".map(d => d.innerText)"
-            ".find(t => /^\\d[\\d,]* meshes · \\d+ layers/.test(t ?? '')) || ''"
+        # Read the count from the USD STORE, not from the status line's text. The
+        # text is a rendered string that depends on typography, locale and the
+        # separator character; the store is the fact. Scraping it is how an
+        # assertion ends up failing on a middot while the number is right — and
+        # `meshCount` is what the manifest says, so comparing to the manifest is
+        # exactly the check worth making.
+        usd_mesh_count = page.evaluate("() => window.__usdStore?.getState().status.meshCount")
+        check(
+            "the store reports the manifest mesh count",
+            usd_mesh_count == USD_MESHES,
+            f"{usd_mesh_count!r} (manifest says {USD_MESHES})",
         )
         check(
-            "the status line reports the manifest mesh count",
-            f"{USD_MESHES:,} meshes" in usd_line,
-            usd_line,
+            "the status line surfaces that count",
+            f"{USD_MESHES:,}" in page.inner_text("body"),
+            f"expected {USD_MESHES:,} in the rendered text",
         )
         check(
             "the USD tab is the active one",
@@ -377,10 +379,24 @@ def main() -> None:
         check("the inspector appears on a pick", sel.count() == 1)
         check("the inspector starts open", sel_toggle.get_attribute("aria-expanded") == "true")
         # The property-set GROUPS default to closed, so their names are not in
-        # the panel's text until expanded — the identity rows (category, name,
-        # type, localId) are there either way. Expand every collapsed group
-        # before asserting on a set name, or this reads as data loss when the
-        # panel is behaving exactly as documented.
+        # the panel's innerText until expanded. Read the group HEADERS from the
+        # DOM (`data-testid="pset-group-…"`) instead of the text: the header is
+        # rendered whether the group is open or not, so this does not depend on
+        # expand state at all — which removes the click-then-sleep race entirely.
+        groups = page.evaluate(
+            "() => [...document.querySelectorAll("
+            "'[data-testid=\"selection-panel\"] [data-testid^=\"pset-group-\"]')]"
+            ".map(n => n.getAttribute('data-testid').replace('pset-group-', ''))"
+        )
+        print("   pset groups on element 7211:", groups)
+        for want in ("Pset_WallCommon", "Qto_WallBaseQuantities"):
+            check(f"it renders {want}", want in groups, groups)
+        check(
+            "it renders the material layer set",
+            "Materials" in groups,
+            groups,
+        )
+        # Now expand and confirm the VALUES render, which is what the user sees.
         page.evaluate(
             "() => document.querySelectorAll("
             "'[data-testid=\"selection-panel\"] button[aria-expanded=\"false\"]')"
@@ -393,7 +409,11 @@ def main() -> None:
             "IFCWALL" in text and "Basic Wall" in text,
             text[:120],
         )
-        check("it still renders the property sets", "Pset_WallCommon" in text, text[-200:])
+        check(
+            "an expanded group shows its values",
+            "BERSnl_21_baksteen" in text,
+            text[-200:],
+        )
         sel_toggle.click(force=True)
         time.sleep(0.4)
         check(
