@@ -1356,9 +1356,47 @@ export class ViewerEngine {
     if (!section) return;
     section.setBounds(this.lastBounds);
     section.apply(state, this.world?.renderer?.three as THREE.WebGLRenderer | undefined);
+    this.registerSectionPlane(state.enabled);
     // Ask the fragments renderer for a fresh frame, otherwise the new plane is
     // only picked up on the next camera move.
     void this.fragments?.core.update(true);
+  }
+
+  /**
+   * Publish the section plane to the RENDERER's clipping-plane registry.
+   *
+   * WHY THIS IS SEPARATE FROM `SectionPlane.apply`
+   * ----------------------------------------------
+   * `apply` makes the cut VISIBLE two ways: per-material `clippingPlanes` on the
+   * three.js meshes, and the live plane array behind
+   * `FragmentsModel.getClippingPlanesEvent` (the fragments tiling renderer cuts
+   * on the CPU with it, which is why the measured triangle count responds).
+   *
+   * Neither of those is where PICKING looks. Clicking goes
+   * `Highlighter.highlight` -> `Raycasters.castRay` -> `FastModelPicker.getFullPick`,
+   * and the picker honours clipping by reading exactly one thing:
+   * `world.renderer.three.clippingPlanes`. Its id-pass override material copies
+   * that array into `material.clippingPlanes` and `discard`s on the far side, so
+   * a clipped-away roof is simply not written into the id buffer and cannot come
+   * back as a hit. `SimpleRaycaster.filterClippingPlanes` — the non-fragments
+   * fallback — filters on the same array.
+   *
+   * Left empty, both read an empty list, the id pass discards nothing, and the
+   * click returns the first thing the ray meets in the FULL model. That is
+   * exactly the reported bug: a horizontal section showing only the ground
+   * floor, viewed from above, selects the roof.
+   *
+   * `isLocal` is left at its default (false) so the plane also lands in the
+   * three.js GLOBAL list. Re-applying the same half-space twice is idempotent —
+   * a fragment is discarded if either copy rejects it — so the visible cut is
+   * unchanged, and `tools/verify_section_pick.py` asserts the triangle delta
+   * still moves.
+   */
+  private registerSectionPlane(enabled: boolean): void {
+    const section = this.sectionPlane;
+    const renderer = this.world?.renderer;
+    if (!section || !renderer || typeof renderer.setPlane !== "function") return;
+    renderer.setPlane(enabled, section.plane);
   }
 
   /** What is visible right now, given the active storey filter. */
@@ -1394,6 +1432,21 @@ export class ViewerEngine {
   /** The Fragments model, for the headless diagnostics only. */
   get modelForDiag(): FragmentsModel | null {
     return this.model;
+  }
+
+  /**
+   * The component-side renderer's three.js instance, for the headless
+   * diagnostics only.
+   *
+   * `clippingPlanes` on THIS object is what a click actually consults: the GPU
+   * fast-picker copies it into its id-pass override material and `discard`s
+   * outside it, and `SimpleRaycaster.filterClippingPlanes` filters on it. A
+   * section that never appears here is a section you can still click through,
+   * so a probe must be able to read it. Not `renderer.clippingPlanes` (the
+   * component array) — this is `world.renderer.three`.
+   */
+  get rendererForDiag(): THREE.WebGLRenderer | null {
+    return (this.world?.renderer?.three as THREE.WebGLRenderer | undefined) ?? null;
   }
 
   /** Storey -> its element ids, for the headless diagnostics only. */
@@ -1540,6 +1593,14 @@ export class ViewerEngine {
     this.onControlsUpdate = null;
     this.onCameraChanged = null;
     this.onFragmentsBeforeDispose = null;
+
+    // Take the section plane back out of the renderer registry BEFORE the
+    // world goes. `setPlane` mutates the renderer that owns the array, so it has
+    // to happen while `this.world` is still set — and it is keyed on plane
+    // IDENTITY, so passing the same live `SectionPlane.plane` instance removes
+    // the exact object that was added. Leaving it would strand a plane in the
+    // global clipping list and clip the next world's geometry.
+    this.registerSectionPlane(false);
 
     this.components?.dispose?.();
     this.components = null;

@@ -707,7 +707,18 @@ export class UsdEngine {
       // invisible.
       const hits = raycaster.intersectObjects(this.pickables(), false);
       this.clearHighlight();
-      const hit = hits[0];
+      // A mesh can still SURVIVE the coarse `pickables()` prefilter and be hit at
+      // a point that the section has cut away — the prefilter only rejects boxes
+      // lying wholly on the clipped side, and a single wall straddling the plane
+      // survives it. So the hit point itself is tested against the plane here.
+      //
+      // Sign convention (measured, not assumed): the shader discards a fragment
+      // when `dot(vClipPosition, plane.xyz) > plane.w` with
+      // `vClipPosition = -mvPosition.xyz`, which reduces to discarding where
+      // `plane.distanceToPoint(worldPoint) > 0`. So the half that is KEPT is
+      // `distance <= 0`. Getting this backwards inverts picking rather than
+      // fixing it, so it is asserted in `tools/verify_section_pick.py`.
+      const hit = hits.find((candidate) => this.isInsideSection(candidate.point));
       if (!hit) {
         this.lastSelection = null;
         this.callbacks.onSelection?.(null);
@@ -797,6 +808,28 @@ export class UsdEngine {
   /** The live renderer, for the headless diagnostics only. */
   get rendererForDiag(): THREE.WebGLRenderer | null {
     return this.renderer;
+  }
+
+  /**
+   * The section plane, for the headless diagnostics only.
+   *
+   * A probe needs the LIVE `THREE.Plane` to assert the kept half-space, because
+   * the sign convention is the one thing that can silently invert: the section
+   * still "works" (it cuts, the triangles drop) while picking reports the mirror
+   * image of what is drawn.
+   */
+  get sectionForDiag(): SectionPlane | null {
+    return this.sectionPlane;
+  }
+
+  /** Every mesh, for the headless diagnostics only. */
+  get meshesForDiag(): THREE.Mesh[] {
+    return this.meshes;
+  }
+
+  /** The measured model bounds, for the headless diagnostics only. */
+  get boundsForDiag(): THREE.Box3 | null {
+    return this.bounds;
   }
 
   /** True when a mesh is non-indexed, so a probe knows the vertex layout. */
@@ -978,21 +1011,53 @@ export class UsdEngine {
     return this.isolatedNode;
   }
 
+  /**
+   * Is this world point on the half of the model the section KEEPS?
+   *
+   * With no cut in force every point is visible, so this is `true` and picking
+   * behaves exactly as it did before a section existed.
+   *
+   * The sign is the load-bearing detail. three.js discards a fragment when
+   * `dot(vClipPosition, plane.xyz) > plane.w`, and `vClipPosition` is the
+   * NEGATED view-space position, so that test is equivalent to discarding where
+   * `plane.distanceToPoint(worldPoint) > 0` — the half that survives is
+   * `distance <= 0`. `tools/verify_section_pick.py` asserts this against the
+   * real renderer, because an inverted sign is not a small error: it makes
+   * picking report the mirror image of what is drawn.
+   */
+  private isInsideSection(point: THREE.Vector3): boolean {
+    const section = this.sectionPlane;
+    if (!section?.isApplied) return true;
+    return section.plane.distanceToPoint(point) <= 0;
+  }
+
   /** Meshes a raycast can legitimately hit, i.e. not shader-clipped away. */
   private pickables(): THREE.Mesh[] {
     if (!this.sectionPlane?.isApplied) return this.meshes;
     const plane = this.sectionPlane.plane;
     const out: THREE.Mesh[] = [];
-    const target = new THREE.Vector3();
+    const world = new THREE.Box3();
     for (const mesh of this.meshes) {
       if (!mesh.visible) continue;
       if (!mesh.geometry?.boundingBox) mesh.geometry.computeBoundingBox();
-      const box = mesh.geometry?.boundingBox;
-      if (!box || box.isEmpty()) continue;
+      const local = mesh.geometry?.boundingBox;
+      if (!local || local.isEmpty()) continue;
+      // WORLD space, not local. The composer's root carries a
+      // `rotation.x = -PI/2` (the stage is Z-up) and per-prim scale, so a local
+      // bounding box is in the wrong frame entirely: comparing its centre
+      // against a WORLD-space plane silently keeps or drops the wrong meshes.
+      // `measureBounds` already does the same transform for the same reason.
+      mesh.updateWorldMatrix(true, false);
+      world.copy(local).applyMatrix4(mesh.matrixWorld);
+      if (world.isEmpty()) continue;
       // Cheap accept/reject: if the box's nearest point is on the kept side of
-      // the plane, some of this mesh survives, so keep it pickable.
-      box.getCenter(target);
-      if (plane.distanceToPoint(target) < 0) continue;
+      // the plane, some of this mesh survives, so keep it pickable. Testing the
+      // CENTRE alone is wrong for a large mesh that straddles the plane — a
+      // floor slab or a roof, which is exactly the case that has to stay
+      // selectable — so measure the box's own extent against the plane.
+      if (plane.distanceToPoint(world.min) > 0 && plane.distanceToPoint(world.max) > 0) {
+        continue;
+      }
       out.push(mesh);
     }
     return out;
