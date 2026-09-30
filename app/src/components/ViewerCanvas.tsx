@@ -41,6 +41,11 @@ export function ViewerCanvas() {
     // Exposed so the storey buttons can drive visibility without prop-drilling
     // the engine through the tree.
     (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine = engine;
+    // The store too, mirroring UsdCanvas: the headless checks read and write the
+    // same state the panels render from, so an assertion exercises the real
+    // path instead of synthesising DOM events.
+    (window as unknown as { __viewerStore?: typeof useViewerStore }).__viewerStore =
+      useViewerStore;
 
     engine.load(container).then(() => {
       // Built from `getItemsOfCategories`, which is the only spatial query that
@@ -56,6 +61,7 @@ export function ViewerCanvas() {
     return () => {
       engine.dispose();
       delete (window as unknown as { __bimEngine?: ViewerEngine }).__bimEngine;
+      delete (window as unknown as { __viewerStore?: typeof useViewerStore }).__viewerStore;
     };
   }, []);
 

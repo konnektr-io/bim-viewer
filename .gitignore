@@ -1,4 +1,10 @@
+# `node_modules` WITHOUT a trailing slash on the second form, on purpose.
+# `node_modules/` ignores the directory's CONTENTS but still matches a SYMLINK
+# named node_modules as a file — and worktrees symlink it from the main clone
+# instead of reinstalling, so `git add` would commit the symlink and CI would
+# then build against a dangling path. Both forms are needed:
 node_modules/
+node_modules
 dist/
 __pycache__/
 *.pyc

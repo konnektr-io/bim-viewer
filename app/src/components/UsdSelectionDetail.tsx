@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Copy } from "lucide-react";
+import { Copy } from "lucide-react";
 
 import { useUsdStore } from "@/store/usdStore";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CollapsiblePanel } from "@/components/CollapsiblePanel";
 import { Separator } from "@/components/ui/separator";
 
 /**
@@ -17,7 +17,6 @@ import { Separator } from "@/components/ui/separator";
  */
 export function UsdSelectionDetail() {
   const selection = useUsdStore((s) => s.selection);
-  const [open, setOpen] = useState(true);
   const [filter, setFilter] = useState("");
 
   const copyAllText = useMemo(() => {
@@ -41,69 +40,54 @@ export function UsdSelectionDetail() {
     .filter(([k, v]) => !query || k.toLowerCase().includes(query) || v.toLowerCase().includes(query));
 
   return (
-    <Card className="min-w-0" data-testid="usd-selection-panel">
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground">
-            Prim
-          </CardTitle>
-          <div className="flex items-center gap-1">
-            <CopyButton text={selection.path} label="copy path" />
-            <CopyButton text={copyAllText} label="copy all" />
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-6"
-              aria-label={open ? "Collapse prim" : "Expand prim"}
-              aria-expanded={open}
-              onClick={() => setOpen((value) => !value)}
-            >
-              <ChevronDown
-                className={open ? "size-4 rotate-180 transition-transform" : "size-4 transition-transform"}
-              />
-            </Button>
-          </div>
+    <CollapsiblePanel
+      id="selection-usd"
+      title="Prim"
+      className="min-w-0"
+      testId="usd-selection-panel"
+      actions={
+        <>
+          <CopyButton text={selection.path} label="copy path" />
+          <CopyButton text={copyAllText} label="copy all" />
+        </>
+      }
+    >
+      <div className="min-w-0 space-y-1 text-sm">
+        <Row label="Path" value={selection.path} mono testId="usd-prim-path" />
+        <Row label="Layer" value={selection.rootPrim} />
+        {selection.ifc.storey ? <Row label="Storey" value={selection.ifc.storey} /> : null}
+        {selection.ifc.category ? <Row label="Category" value={selection.ifc.category} /> : null}
+        {selection.ifc.element ? <Row label="Element" value={selection.ifc.element} /> : null}
+
+        <div className="pt-2">
+          <input
+            type="search"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter attributes…"
+            aria-label="Filter attributes"
+            className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring"
+          />
         </div>
-      </CardHeader>
 
-      {open ? (
-        <CardContent className="min-w-0 space-y-1 text-sm">
-          <Row label="Path" value={selection.path} mono testId="usd-prim-path" />
-          <Row label="Layer" value={selection.rootPrim} />
-          {selection.ifc.storey ? <Row label="Storey" value={selection.ifc.storey} /> : null}
-          {selection.ifc.category ? <Row label="Category" value={selection.ifc.category} /> : null}
-          {selection.ifc.element ? <Row label="Element" value={selection.ifc.element} /> : null}
+        {rows.length > 0 ? (
+          <>
+            <Separator className="my-3" />
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Attributes
+            </div>
+            {rows.map(([key, value]) => (
+              <Row key={key} label={key} value={value} />
+            ))}
+          </>
+        ) : null}
 
-          <div className="pt-2">
-            <input
-              type="search"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="Filter attributes…"
-              aria-label="Filter attributes"
-              className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring"
-            />
-          </div>
-
-          {rows.length > 0 ? (
-            <>
-              <Separator className="my-3" />
-              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Attributes
-              </div>
-              {rows.map(([key, value]) => (
-                <Row key={key} label={key} value={value} />
-              ))}
-            </>
-          ) : null}
-
-          <p className="pt-3 text-xs text-muted-foreground">
-            The USD carries geometry, not semantics. Property sets, room names and the
-            GlobalId live in the <strong className="text-foreground">IFC</strong> view.
-          </p>
-        </CardContent>
-      ) : null}
-    </Card>
+        <p className="pt-3 text-xs text-muted-foreground">
+          The USD carries geometry, not semantics. Property sets, room names and the
+          GlobalId live in the <strong className="text-foreground">IFC</strong> view.
+        </p>
+      </div>
+    </CollapsiblePanel>
   );
 }
 
