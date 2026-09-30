@@ -238,13 +238,12 @@ def main() -> None:
         # for a long time. This runs the identical React handler.
         def switch_to(f: str) -> None:
             page.evaluate("(f) => document.querySelector(`[role=tablist] a[href='/${f}']`).click()", f)
+            page.wait_for_function(f"() => location.pathname === '/{f}'", timeout=30_000)
 
         switch_to("usd")
-        page.wait_for_function("() => location.pathname === '/usd'", timeout=30_000)
         check("clicking USD pushes /usd", page.evaluate("() => location.pathname") == "/usd")
 
         switch_to("ifc")
-        page.wait_for_function("() => location.pathname === '/ifc'", timeout=30_000)
         check("clicking IFC pushes /ifc", page.evaluate("() => location.pathname") == "/ifc")
 
         # Re-selecting the format already shown is not a navigation, so it must
@@ -268,6 +267,31 @@ def main() -> None:
             bool(page4.evaluate("() => !!window.__bimEngine")),
         )
         page4.close()
+
+        # ------------------------------------------------------------------
+        # The right-hand panels are gated on `isReady` in App.tsx, so they do
+        # not exist until a model has loaded. Assert THAT rather than pretending
+        # the stub can show them: it is the real invariant, and it is the reason
+        # the inspector's fold has to be checked in the slow suite.
+        print("\n=== 5. the model's panels appear only once a model is ready ===")
+        switch_to("ifc")
+        time.sleep(1.0)
+        check(
+            "no inspector before a model has loaded",
+            page.locator('[data-panel-toggle="selection-ifc"]').count() == 0,
+        )
+        check(
+            "no section panel before a model has loaded",
+            page.locator('[data-panel-toggle="section-ifc"]').count() == 0,
+        )
+        check(
+            "the frame panel IS there — it is not gated on a model",
+            page.locator('[data-panel-toggle="model"]').count() == 1,
+        )
+        check(
+            "the IFC store is exposed for assertions",
+            bool(page.evaluate("() => !!window.__viewerStore")),
+        )
 
         # The 404 on the stub's IFC route is expected: no model is served here.
         real = [e for e in errors if "PAGEERROR" in e or "TypeError" in e]

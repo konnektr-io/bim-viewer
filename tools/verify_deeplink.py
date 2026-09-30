@@ -369,10 +369,19 @@ def main() -> None:
         check("no fragments errors from switching views", not switched, switched[:3])
 
         # ------------------------------------------------------------------
-        print("\n=== 5. the inspector is still collapsible AND still renders ===")
-        switch_to(page, "ifc")
+        # The inspector's own fold is checked in verify_fast.py, against a
+        # synthetic selection. What is HERE is narrower: that the panel still
+        # reports REAL property sets for a real element after the routing and
+        # panel changes. That does need the model, which is why it lives in this
+        # file rather than the fast one.
+        print("\n=== 5. the inspector still reports real property sets ===")
+        # The switch loop above already ENDED on `ifc`, and it waited on the
+        # store, not the status text. Re-switching and re-gating on
+        # `innerText.includes('elements')` here was both redundant and wrong —
+        # that text gate is exactly the shared-status-line trap. Use the store.
         page.wait_for_function(
-            "() => document.body.innerText.includes('elements')", timeout=420_000
+            "() => !!window.__bimEngine && window.__bimEngine.totalCount > 0",
+            timeout=420_000,
         )
         # `reportSelection` is async and goes out to the Fragments worker, so
         # `evaluate` returns before the panel exists. Wait for the panel rather
