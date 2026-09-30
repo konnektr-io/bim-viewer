@@ -163,10 +163,20 @@ def main() -> None:
             "the USDZ package was fetched",
             any("/api/usd/scene.usdz" in u for u in requests),
         )
+        # Read the count from the status LINE in the DOM, not from the truncated
+        # `status` string — `wait_ready` cuts at 120 chars, and the "N meshes"
+        # text sits after the tab bar, so it can be cut off entirely. The mesh
+        # count is the claim that the right model composed, so it is worth
+        # reading it whole.
+        usd_line = page.evaluate(
+            "() => [...document.querySelectorAll('div')]"
+            ".map(d => d.innerText)"
+            ".find(t => /^\\d[\\d,]* meshes · \\d+ layers/.test(t ?? '')) || ''"
+        )
         check(
             "the status line reports the manifest mesh count",
-            f"{USD_MESHES:,} meshes" in status,
-            status.splitlines()[2] if len(status.splitlines()) > 2 else status,
+            f"{USD_MESHES:,} meshes" in usd_line,
+            usd_line,
         )
         check(
             "the USD tab is the active one",
@@ -322,14 +332,24 @@ def main() -> None:
 
         # The early-switch bug this feature exists to avoid: switching views must
         # not leave a half-torn-down engine throwing.
+        #
+        # Readiness is read from the STORES, not from the status line text. The
+        # text is shared between the two views — both render through the same
+        # `StatusLine`, and while a conversion runs the OTHER view's status can
+        # still be on screen. So "did the switch complete" is the format being
+        # right AND its own store reporting `ready`, which is what the UI gates
+        # every control on. `time.sleep(2)` after each switch is the settle the
+        # skill's own guidance asks for before tearing an engine down.
+        READY = """(f) => {
+            const s = f === 'usd' ? window.__usdStore?.getState()
+                                  : window.__bimEngine;
+            if (f === 'usd') return s?.status?.state === 'ready';
+            return !!s && s.totalCount > 0;
+        }"""
         for target in ("ifc", "usd", "ifc"):
             switch_to(page, target)
-            page.wait_for_function(
-                "(n) => document.body.innerText.includes(n)",
-                arg="elements" if target == "ifc" else "meshes",
-                timeout=420_000,
-            )
-            time.sleep(2)
+            page.wait_for_function(READY, arg=target, timeout=420_000)
+            time.sleep(4)
         switched = [e for e in errors[before_back:] if "ragment" in e or "not found" in e]
         check("no fragments errors from switching views", not switched, switched[:3])
 
@@ -356,8 +376,24 @@ def main() -> None:
         sel_toggle.wait_for(timeout=30_000)
         check("the inspector appears on a pick", sel.count() == 1)
         check("the inspector starts open", sel_toggle.get_attribute("aria-expanded") == "true")
+        # The property-set GROUPS default to closed, so their names are not in
+        # the panel's text until expanded — the identity rows (category, name,
+        # type, localId) are there either way. Expand every collapsed group
+        # before asserting on a set name, or this reads as data loss when the
+        # panel is behaving exactly as documented.
+        page.evaluate(
+            "() => document.querySelectorAll("
+            "'[data-testid=\"selection-panel\"] button[aria-expanded=\"false\"]')"
+            ".forEach(b => b.click())"
+        )
+        time.sleep(0.5)
         text = sel.inner_text()
-        check("it still renders the property sets", "Pset_WallCommon" in text, text[:120])
+        check(
+            "it renders the identity of the picked element",
+            "IFCWALL" in text and "Basic Wall" in text,
+            text[:120],
+        )
+        check("it still renders the property sets", "Pset_WallCommon" in text, text[-200:])
         sel_toggle.click(force=True)
         time.sleep(0.4)
         check(
