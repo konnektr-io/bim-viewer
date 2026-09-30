@@ -9,6 +9,7 @@ import { create } from "zustand";
 import type { Format, LoadStatus, Room, Selection, Storey } from "@/viewer/types";
 import type { AssetNode } from "@/components/AssetTree";
 import type { ViewPreset } from "@/viewer/viewPresets";
+import { initialFormat, syncUrl } from "@/lib/formatRoute";
 import {
   DEFAULT_SECTION,
   type SectionState,
@@ -49,7 +50,10 @@ interface ViewerState {
 }
 
 export const useViewerStore = create<ViewerState>((set) => ({
-  format: "ifc",
+  // Seeded from the URL, so a cold load of /usd mounts the USD engine and
+  // nothing else. It is the ONE place the format is decided on first paint;
+  // afterwards every change goes through `setFormat`.
+  format: initialFormat(),
   status: { state: "idle" },
   modelTitle: "BIM model",
   storeys: [],
@@ -66,7 +70,10 @@ export const useViewerStore = create<ViewerState>((set) => ({
   setTree: (tree) => set({ tree }),
   setIsolatedNode: (isolatedNodeId) => set({ isolatedNodeId }),
 
-  setFormat: (format) => set({ format, selection: null }),
+  setFormat: (format) => {
+    syncUrl(format);
+    set({ format, selection: null });
+  },
 
   setModelTitle: (modelTitle) => set({ modelTitle }),
 

@@ -3,7 +3,7 @@ import { ChevronDown, Copy } from "lucide-react";
 
 import { useViewerStore } from "@/store/viewerStore";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CollapsiblePanel } from "@/components/CollapsiblePanel";
 import { Separator } from "@/components/ui/separator";
 import { CIRCUIT_LABELS } from "@/viewer/labels";
 import type { PropertySet } from "@/viewer/types";
@@ -17,10 +17,14 @@ import type { PropertySet } from "@/viewer/types";
  * the ids are the point: quoting the exact `localId` / `GlobalId` back is
  * what makes an edit request actionable ("move #12345") instead of a
  * description.
+ *
+ * The panel's own fold is the shared `CollapsiblePanel` (and it is remembered in
+ * localStorage). The per-property-set groups below keep their own local fold —
+ * that one is about volume within the panel, not about getting the panel out of
+ * the way, and resetting it on every new selection would be wrong.
  */
 export function SelectionDetail() {
   const selection = useViewerStore((s) => s.selection);
-  const [open, setOpen] = useState(true);
   const [showAll, setShowAll] = useState(false);
   const [filter, setFilter] = useState("");
 
@@ -110,133 +114,124 @@ export function SelectionDetail() {
   );
 
   return (
-    <Card className="min-w-0" data-testid="selection-panel">
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground">
-            Selection
-          </CardTitle>
-          <div className="flex items-center gap-1">
-            <CopyIdButton id={String(selection.localId)} label="localId" />
-            <CopyTextButton text={copyAllText} label="copy all" title="Copy all identifiers and properties" />
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-6"
-              aria-label={open ? "Collapse selection" : "Expand selection"}
-              aria-expanded={open}
-              onClick={() => setOpen((value) => !value)}
-            >
-              <ChevronDown className={open ? "size-4 rotate-180 transition-transform" : "size-4 transition-transform"} />
-            </Button>
-          </div>
-        </div>
-      </CardHeader>
-
-      {open ? (
-        <CardContent className="min-w-0 space-y-1 text-sm">
-          <Row label="Category" value={selection.category} />
-          {selection.name ? <Row label="Name" value={selection.name} /> : null}
-          <Row label="Room" value={selection.room ?? "—"} />
-          {selection.typeName ? <Row label="Type" value={selection.typeName} /> : null}
-          <RowWithCopy
-            label="localId"
-            value={String(selection.localId)}
-            mono
-            testId="selection-localId"
+    <CollapsiblePanel
+      id="selection-ifc"
+      title="Selection"
+      className="min-w-0"
+      testId="selection-panel"
+      actions={
+        <>
+          <CopyIdButton id={String(selection.localId)} label="localId" />
+          <CopyTextButton
+            text={copyAllText}
+            label="copy all"
+            title="Copy all identifiers and properties"
           />
-          {selection.guid ? (
-            <RowWithCopy
-              label="GlobalId"
-              value={selection.guid}
-              mono
-              testId="selection-guid"
-            />
-          ) : null}
+        </>
+      }
+    >
+      <div className="min-w-0 space-y-1 text-sm">
+        <Row label="Category" value={selection.category} />
+        {selection.name ? <Row label="Name" value={selection.name} /> : null}
+        <Row label="Room" value={selection.room ?? "—"} />
+        {selection.typeName ? <Row label="Type" value={selection.typeName} /> : null}
+        <RowWithCopy
+          label="localId"
+          value={String(selection.localId)}
+          mono
+          testId="selection-localId"
+        />
+        {selection.guid ? (
+          <RowWithCopy
+            label="GlobalId"
+            value={selection.guid}
+            mono
+            testId="selection-guid"
+          />
+        ) : null}
 
-          <div className="pt-2">
-            <input
-              type="search"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="Filter properties…"
-              aria-label="Filter properties"
-              className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring"
-            />
-          </div>
+        <div className="pt-2">
+          <input
+            type="search"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter properties…"
+            aria-label="Filter properties"
+            className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring"
+          />
+        </div>
 
-          {circuitVisible.length > 0 ? (
-            <>
-              <Separator className="my-3" />
-              <PsetGroup
-                name="Pset_ElectricalCircuit"
-                defaultOpen
-                testId="pset-group-Pset_ElectricalCircuit"
-              >
-                {circuitVisible.map(({ key, label, value }) => (
-                  <Row key={key} label={label} value={value} />
-                ))}
-              </PsetGroup>
-            </>
-          ) : null}
+        {circuitVisible.length > 0 ? (
+          <>
+            <Separator className="my-3" />
+            <PsetGroup
+              name="Pset_ElectricalCircuit"
+              defaultOpen
+              testId="pset-group-Pset_ElectricalCircuit"
+            >
+              {circuitVisible.map(({ key, label, value }) => (
+                <Row key={key} label={label} value={value} />
+              ))}
+            </PsetGroup>
+          </>
+        ) : null}
 
-          {visibleSets.map(({ set, rows }) => (
-            <div key={`${set.kind}#${set.name}`}>
-              <Separator className="my-3" />
-              <PsetGroup
-                name={set.kind === "type" ? `${set.name} (type)` : set.name}
-                badge={set.kind === "qto" ? "Qto" : set.kind === "type" ? "type" : undefined}
-                count={rows.length}
-                testId={`pset-group-${set.name}`}
-              >
-                {rows.map(([key, value]) => (
-                  <Row key={key} label={key} value={value} />
-                ))}
-              </PsetGroup>
-            </div>
-          ))}
-
-          {materialRows.length > 0 ? (
-            <>
-              <Separator className="my-3" />
-              <PsetGroup
-                name={selection.materialLayerSetName ?? "Materials"}
-                badge="layers"
-                count={materialRows.length}
-                testId="pset-group-Materials"
-              >
-                {materialRows.map((layer, index) => (
-                  <Row
-                    key={`${layer.name}-${index}`}
-                    label={layer.thickness ?? "Material"}
-                    value={layer.thickness ? `${layer.name} — ${layer.thickness}` : layer.name}
-                  />
-                ))}
-              </PsetGroup>
-            </>
-          ) : null}
-
-          {attributeRows.length > 0 ? (
-            <>
-              <Separator className="my-3" />
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Attributes
-                </div>
-                {attributeRows.length > 8 && !query ? (
-                  <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => setShowAll((v) => !v)}>
-                    {showAll ? "Fewer" : `All ${attributeRows.length}`}
-                  </Button>
-                ) : null}
-              </div>
-              {shown.map(([key, value]) => (
+        {visibleSets.map(({ set, rows }) => (
+          <div key={`${set.kind}#${set.name}`}>
+            <Separator className="my-3" />
+            <PsetGroup
+              name={set.kind === "type" ? `${set.name} (type)` : set.name}
+              badge={set.kind === "qto" ? "Qto" : set.kind === "type" ? "type" : undefined}
+              count={rows.length}
+              testId={`pset-group-${set.name}`}
+            >
+              {rows.map(([key, value]) => (
                 <Row key={key} label={key} value={value} />
               ))}
-            </>
-          ) : null}
-        </CardContent>
-      ) : null}
-    </Card>
+            </PsetGroup>
+          </div>
+        ))}
+
+        {materialRows.length > 0 ? (
+          <>
+            <Separator className="my-3" />
+            <PsetGroup
+              name={selection.materialLayerSetName ?? "Materials"}
+              badge="layers"
+              count={materialRows.length}
+              testId="pset-group-Materials"
+            >
+              {materialRows.map((layer, index) => (
+                <Row
+                  key={`${layer.name}-${index}`}
+                  label={layer.thickness ?? "Material"}
+                  value={layer.thickness ? `${layer.name} — ${layer.thickness}` : layer.name}
+                />
+              ))}
+            </PsetGroup>
+          </>
+        ) : null}
+
+        {attributeRows.length > 0 ? (
+          <>
+            <Separator className="my-3" />
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Attributes
+              </div>
+              {attributeRows.length > 8 && !query ? (
+                <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => setShowAll((v) => !v)}>
+                  {showAll ? "Fewer" : `All ${attributeRows.length}`}
+                </Button>
+              ) : null}
+            </div>
+            {shown.map(([key, value]) => (
+              <Row key={key} label={key} value={value} />
+            ))}
+          </>
+        ) : null}
+      </div>
+    </CollapsiblePanel>
   );
 }
 

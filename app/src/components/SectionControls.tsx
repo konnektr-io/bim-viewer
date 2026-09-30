@@ -11,6 +11,11 @@
  * `SectionPlane` is format-agnostic by construction — it clips by assigning
  * `material.clippingPlanes`, which is all a stock-three.js scene (USD) needs,
  * and the IFC engine additionally hands the same plane to Fragments' renderer.
+ *
+ * `embedded` drops the Card and the title bar, because `App` wraps this in the
+ * shared collapsible frame and owns the header. It also keeps `SectionToggle`
+ * outside the collapsed body: whether the cut is live is the one thing about
+ * this panel you need to know without opening it.
  */
 import { useUsdStore } from "@/store/usdStore";
 import { useViewerStore } from "@/store/viewerStore";
@@ -27,12 +32,16 @@ const AXES = [
   { value: "z", label: "Depth" },
 ] as const;
 
-export function SectionControls({ format }: { format: Format }) {
+/** Read the section from whichever store this format owns. */
+function useSection(format: Format): SectionState {
   const ifcSection = useViewerStore((s) => s.section);
   const usdSection = useUsdStore((s) => s.section);
-  const section = format === "usd" ? usdSection : ifcSection;
+  return format === "usd" ? usdSection : ifcSection;
+}
 
-  const apply = (patch: Partial<SectionState>): void => {
+/** Write a patch to the right store, then hand the MERGED state to the engine. */
+function useApplySection(format: Format): (patch: Partial<SectionState>) => void {
+  return (patch) => {
     const usd = format === "usd";
     if (usd) useUsdStore.getState().setSection(patch);
     else useViewerStore.getState().setSection(patch);
@@ -44,88 +53,116 @@ export function SectionControls({ format }: { format: Format }) {
     const target = usd ? engine.__usdEngine : engine.__bimEngine;
     target?.setSection(merged);
   };
+}
+
+export function SectionToggle({ format }: { format: Format }) {
+  const section = useSection(format);
+  const apply = useApplySection(format);
+
+  return (
+    <Button
+      size="sm"
+      variant={section.enabled ? "default" : "outline"}
+      onClick={() => apply({ enabled: !section.enabled })}
+      aria-pressed={section.enabled}
+      aria-label={section.enabled ? "Turn the section off" : "Turn the section on"}
+    >
+      {section.enabled ? "On" : "Off"}
+    </Button>
+  );
+}
+
+export function SectionControls({
+  format,
+  embedded = false,
+}: {
+  format: Format;
+  /** True when a parent already renders the card and the title bar. */
+  embedded?: boolean;
+}) {
+  const section = useSection(format);
+  const apply = useApplySection(format);
+
+  const body = (
+    <CardContent className="space-y-3">
+      <div className="flex gap-1">
+        {AXES.map((axis) => (
+          <Button
+            key={axis.value}
+            size="sm"
+            variant={section.axis === axis.value ? "secondary" : "ghost"}
+            className="flex-1"
+            onClick={() => apply({ axis: axis.value as SectionState["axis"], enabled: true })}
+          >
+            {axis.label}
+          </Button>
+        ))}
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Position</span>
+          <span className="tabular-nums">{Math.round(section.offset * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={Math.round(section.offset * 100)}
+          className="w-full accent-[var(--brand-teal)]"
+          onChange={(event) => apply({ offset: Number(event.target.value) / 100, enabled: true })}
+          aria-label="Section position"
+        />
+      </div>
+
+      {/*
+        Which half survives. The plane does not move — only its normal flips —
+        so the same slider shows what is above the cut or what is below it.
+      */}
+      <div className="space-y-1">
+        <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          Show
+        </div>
+        <div className="flex gap-1">
+          <Button
+            size="sm"
+            variant={section.side === "negative" ? "secondary" : "ghost"}
+            className="flex-1"
+            onClick={() => apply({ side: "negative", enabled: true })}
+          >
+            Below
+          </Button>
+          <Button
+            size="sm"
+            variant={section.side === "positive" ? "secondary" : "ghost"}
+            className="flex-1"
+            onClick={() => apply({ side: "positive", enabled: true })}
+          >
+            Above
+          </Button>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        {section.side === "negative"
+          ? "Everything under the cut is kept."
+          : "Everything over the cut is kept."}
+      </p>
+    </CardContent>
+  );
+
+  if (embedded) return <div className="pt-4">{body}</div>;
 
   return (
     <Card>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-sm">Section</CardTitle>
-          <Button
-            size="sm"
-            variant={section.enabled ? "default" : "outline"}
-            onClick={() => apply({ enabled: !section.enabled })}
-            aria-pressed={section.enabled}
-          >
-            {section.enabled ? "On" : "Off"}
-          </Button>
+          <SectionToggle format={format} />
         </div>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex gap-1">
-          {AXES.map((axis) => (
-            <Button
-              key={axis.value}
-              size="sm"
-              variant={section.axis === axis.value ? "secondary" : "ghost"}
-              className="flex-1"
-              onClick={() => apply({ axis: axis.value as SectionState["axis"], enabled: true })}
-            >
-              {axis.label}
-            </Button>
-          ))}
-        </div>
-
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Position</span>
-            <span className="tabular-nums">{Math.round(section.offset * 100)}%</span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={Math.round(section.offset * 100)}
-            className="w-full accent-[var(--brand-teal)]"
-            onChange={(event) => apply({ offset: Number(event.target.value) / 100, enabled: true })}
-            aria-label="Section position"
-          />
-        </div>
-
-        {/*
-          Which half survives. The plane does not move — only its normal flips —
-          so the same slider shows what is above the cut or what is below it.
-        */}
-        <div className="space-y-1">
-          <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Show
-          </div>
-          <div className="flex gap-1">
-            <Button
-              size="sm"
-              variant={section.side === "negative" ? "secondary" : "ghost"}
-              className="flex-1"
-              onClick={() => apply({ side: "negative", enabled: true })}
-            >
-              Below
-            </Button>
-            <Button
-              size="sm"
-              variant={section.side === "positive" ? "secondary" : "ghost"}
-              className="flex-1"
-              onClick={() => apply({ side: "positive", enabled: true })}
-            >
-              Above
-            </Button>
-          </div>
-        </div>
-
-        <p className="text-xs text-muted-foreground">
-          {section.side === "negative"
-            ? "Everything under the cut is kept."
-            : "Everything over the cut is kept."}
-        </p>
-      </CardContent>
+      {body}
     </Card>
   );
 }
