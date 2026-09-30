@@ -10,10 +10,12 @@ import { Separator } from "@/components/ui/separator";
  * Inspector for the picked USD prim.
  *
  * Shaped like the IFC attribute inspector on purpose — same collapsible rows,
- * same copyable identifiers — so the two tabs feel like one tool. What differs is
- * what there IS to show: the USD carries no property sets and no GlobalId, so
- * this shows the prim path (the identity) and the geometry facts, and states
- * plainly that semantics live in the IFC tab.
+ * same copyable identifiers — so the two tabs feel like one tool. What differs
+ * is what there IS to show: the path (the identity) and the per-mesh geometry
+ * facts. The layer itself does carry the IFC metadata now — the converter
+ * authors `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus Tag, Name and every
+ * pset value) onto each element prim — but this panel reads the picked MESH,
+ * not the authored attributes, so it stays a geometry view.
  */
 export function UsdSelectionDetail() {
   const selection = useUsdStore((s) => s.selection);
@@ -81,11 +83,6 @@ export function UsdSelectionDetail() {
             ))}
           </>
         ) : null}
-
-        <p className="pt-3 text-xs text-muted-foreground">
-          The USD carries geometry, not semantics. Property sets, room names and the
-          GlobalId live in the <strong className="text-foreground">IFC</strong> view.
-        </p>
       </div>
     </CollapsiblePanel>
   );

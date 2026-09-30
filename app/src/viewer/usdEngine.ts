@@ -39,12 +39,15 @@
  *
  * WHY THE PRIM PATH IS THE IDENTITY
  * ---------------------------------
- * There is no IFC GlobalId anywhere in the USD: a traverse of every prim
- * attribute for `guid`/`ifc`/`globalid` finds nothing. Prim names embed *Revit*
- * ids and the IFC category is a path SEGMENT. So the composed three.js
- * hierarchy is walked once and the full USD prim path is stored in `userData` —
- * that path is the only stable handle the format gives us, and the IFC tab stays
- * the source of identity.
+ * The composed three.js hierarchy is walked once and the full USD prim path is
+ * stored in `userData` — that path is the handle selections and isolations are
+ * resolved against. Prim names embed *Revit* ids and the IFC category is a path
+ * SEGMENT. The layer DOES carry the IFC identity since the conversion started
+ * running with `--convert-metadata`: every element prim holds
+ * `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus Tag, Name and every pset
+ * value). The composer does not hand those authored attributes back to a picked
+ * mesh, though — they live on the parsed spec, not on `userData` — so the path
+ * stays the identity here and the IFC tab stays the source for semantics.
  */
 import { USDLoader } from "three/examples/jsm/loaders/USDLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
