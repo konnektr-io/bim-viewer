@@ -13,12 +13,16 @@ import http.server
 import json
 import pathlib
 import socketserver
+import sys
 
 DIST = pathlib.Path(__file__).resolve().parents[1] / "app" / "dist"
 USD = pathlib.Path("/opt/data/work/usd-web")
 IFC = pathlib.Path("/opt/data/work/ifc/Achterhekers57.ifc")
 SLUG = "Achterhekers57.ifc"
-PORT = 8097
+# Overridable so two test scripts can run back to back without colliding on a
+# port. A hardcoded port made the second suite report "the server never came up"
+# against a port the shared server does not listen on.
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8097
 
 CONTENT_TYPES = {
     ".html": "text/html",

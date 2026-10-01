@@ -1449,6 +1449,24 @@ export class ViewerEngine {
     return (this.world?.renderer?.three as THREE.WebGLRenderer | undefined) ?? null;
   }
 
+  /**
+   * The component-side clipping-plane list, for the headless diagnostics only.
+   *
+   * Distinct from `rendererForDiag.clippingPlanes`: `setPlane` keeps a
+   * component-side array and then REASSIGNS `three.clippingPlanes` from it,
+   * excluding local planes. So the two can disagree, and a probe that reads only
+   * the three.js one cannot tell "the plane was never registered" from "it was
+   * registered as local and filtered out of the global list".
+   */
+  get componentPlanesForDiag(): number {
+    return this.world?.renderer?.clippingPlanes.length ?? -1;
+  }
+
+  /** The section plane, for the headless diagnostics only. */
+  get sectionForDiag(): SectionPlane | null {
+    return this.sectionPlane;
+  }
+
   /** Storey -> its element ids, for the headless diagnostics only. */
   get storeyElementsForDiag(): Record<number, number[]> {
     return Object.fromEntries(this.storeyElements);

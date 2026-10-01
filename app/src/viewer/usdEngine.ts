@@ -709,15 +709,13 @@ export class UsdEngine {
       this.clearHighlight();
       // A mesh can still SURVIVE the coarse `pickables()` prefilter and be hit at
       // a point that the section has cut away — the prefilter only rejects boxes
-      // lying wholly on the clipped side, and a single wall straddling the plane
+      // lying wholly on the clipped side, and a wall straddling the plane
       // survives it. So the hit point itself is tested against the plane here.
       //
-      // Sign convention (measured, not assumed): the shader discards a fragment
-      // when `dot(vClipPosition, plane.xyz) > plane.w` with
-      // `vClipPosition = -mvPosition.xyz`, which reduces to discarding where
-      // `plane.distanceToPoint(worldPoint) > 0`. So the half that is KEPT is
-      // `distance <= 0`. Getting this backwards inverts picking rather than
-      // fixing it, so it is asserted in `tools/verify_section_pick.py`.
+      // `hits.find`, not `hits[0]`: a three.js raycast returns EVERY intersection
+      // sorted by distance, including ones the section has removed. Taking the
+      // first is what made a click select a roof the user could not see.
+      // (The kept-side sign is derived in `isInsideSection`.)
       const hit = hits.find((candidate) => this.isInsideSection(candidate.point));
       if (!hit) {
         this.lastSelection = null;
@@ -737,19 +735,36 @@ export class UsdEngine {
   private highlight(mesh: THREE.Mesh): void {
     this.highlightMesh = mesh;
     this.originalMaterial = mesh.material as THREE.Material;
-    // NOT oklch(...) — three.js cannot parse that colour model and silently
-    // leaves the highlight unset. A hex literal, same as the IFC viewer.
-    mesh.material = new THREE.MeshStandardMaterial({
+    const replacement = new THREE.MeshStandardMaterial({
       color: 0x4fd6c0,
       emissive: 0x0d3b36,
       metalness: 0.05,
       roughness: 0.6,
     });
+    // Carry the section plane over, or the highlight IGNORES the cut: this
+    // replacement material has no `clippingPlanes` of its own, so selecting a
+    // wall that straddles the plane would paint its clipped-away half back in —
+    // making an invisible part of the model visible, which is the exact class of
+    // bug this change set exists to remove. Copy from the ORIGINAL material
+    // rather than the section, so the highlight is consistent with whatever the
+    // mesh is actually rendered under.
+    const original = this.originalMaterial;
+    if (original && original.clippingPlanes?.length) {
+      replacement.clippingPlanes = [...original.clippingPlanes];
+      replacement.clipShadows = true;
+    }
+    mesh.material = replacement;
   }
 
   private clearHighlight(): void {
     if (this.highlightMesh && this.originalMaterial) {
       this.highlightMesh.material = this.originalMaterial;
+      // The replacement is ours and nobody else holds it; the original is the
+      // mesh's own and must NOT be disposed here.
+      const replacement = this.highlightMesh.material;
+      if (replacement !== this.originalMaterial && replacement instanceof THREE.Material) {
+        replacement.dispose();
+      }
     }
     this.highlightMesh = null;
     this.originalMaterial = null;
@@ -830,6 +845,19 @@ export class UsdEngine {
   /** The measured model bounds, for the headless diagnostics only. */
   get boundsForDiag(): THREE.Box3 | null {
     return this.bounds;
+  }
+
+  /**
+   * The last prim the click handler resolved, for the headless diagnostics only.
+   *
+   * Distinct from the STORE's selection, and the distinction is what makes a
+   * failing click test diagnosable: the store is cleared to `null` by the
+   * handler on a miss, so "nothing selected" cannot tell you whether the
+   * handler ran at all and found nothing, or the synthetic event never reached
+   * it. This field is set on both outcomes, and reset to `null` by `dispose`.
+   */
+  get lastSelectionForDiag(): UsdPrimInfo | null {
+    return this.lastSelection;
   }
 
   /** True when a mesh is non-indexed, so a probe knows the vertex layout. */
@@ -1017,18 +1045,28 @@ export class UsdEngine {
    * With no cut in force every point is visible, so this is `true` and picking
    * behaves exactly as it did before a section existed.
    *
-   * The sign is the load-bearing detail. three.js discards a fragment when
-   * `dot(vClipPosition, plane.xyz) > plane.w`, and `vClipPosition` is the
-   * NEGATED view-space position, so that test is equivalent to discarding where
-   * `plane.distanceToPoint(worldPoint) > 0` — the half that survives is
-   * `distance <= 0`. `tools/verify_section_pick.py` asserts this against the
-   * real renderer, because an inverted sign is not a small error: it makes
-   * picking report the mirror image of what is drawn.
+   * THE SIGN, derived from three.js' own shader (`>= 0`, not `<= 0`):
+   *
+   *   clipping_planes_vertex.glsl   `vClipPosition = -mvPosition.xyz;`
+   *   clipping_planes_fragment.glsl `if (dot(vClipPosition, plane.xyz) > plane.w) discard;`
+   *
+   * Substituting the negated view-space position and rewriting
+   * `plane.w` as the constant gives `-dot(p, n) > c`, i.e.
+   * `dot(p, n) + c < 0` — and `normal·point + constant` is exactly
+   * `Plane.distanceToPoint(point)`. So three.js DISCARDS where that value is
+   * NEGATIVE and KEEPS where it is non-negative.
+   *
+   * I had this inverted first (kept `<= 0`) and `tools/verify_section_pick.py`
+   * caught it: the unfiltered first hit measured `d = -0.11` on geometry that was
+   * plainly still on screen. The symptom is nasty precisely because the section
+   * keeps working — the triangles still drop — while picking quietly reports the
+   * mirror image of the model. `verify_section_pick.py` asserts this against the
+   * live plane via a grid of rays.
    */
   private isInsideSection(point: THREE.Vector3): boolean {
     const section = this.sectionPlane;
     if (!section?.isApplied) return true;
-    return section.plane.distanceToPoint(point) <= 0;
+    return section.plane.distanceToPoint(point) >= 0;
   }
 
   /** Meshes a raycast can legitimately hit, i.e. not shader-clipped away. */
@@ -1050,12 +1088,16 @@ export class UsdEngine {
       mesh.updateWorldMatrix(true, false);
       world.copy(local).applyMatrix4(mesh.matrixWorld);
       if (world.isEmpty()) continue;
-      // Cheap accept/reject: if the box's nearest point is on the kept side of
-      // the plane, some of this mesh survives, so keep it pickable. Testing the
-      // CENTRE alone is wrong for a large mesh that straddles the plane — a
-      // floor slab or a roof, which is exactly the case that has to stay
-      // selectable — so measure the box's own extent against the plane.
-      if (plane.distanceToPoint(world.min) > 0 && plane.distanceToPoint(world.max) > 0) {
+      // Cheap accept/reject: drop a mesh only when its WHOLE box lies on the
+      // clipped side — otherwise some of it survives and it stays pickable.
+      // The sign must match `isInsideSection` (`>= 0` is kept); getting this
+      // backwards rejects the geometry you can see and keeps the geometry you
+      // cannot, which is the original bug wearing a new hat.
+      //
+      // Both corners, not the centre: a floor slab or a roof straddling the
+      // plane has a centre on one side and geometry on the other, and a centre
+      // test wrongly drops a mesh that is still very much visible.
+      if (plane.distanceToPoint(world.min) < 0 && plane.distanceToPoint(world.max) < 0) {
         continue;
       }
       out.push(mesh);

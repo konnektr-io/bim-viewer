@@ -84,6 +84,12 @@ export class SectionPlane {
 
   /** Record the model bounds so the 0..1 offset maps onto real coordinates. */
   setBounds(box: THREE.Box3 | null): void {
+    // A null/empty box must NOT clear what is already known: `worldPointFor`
+    // maps the 0..1 offset onto `this.extent`/`this.center`, so leaving them at
+    // their zero defaults silently places the plane at the world origin instead
+    // of failing. Returning early keeps the last good bounds, which is what the
+    // caller means when it re-applies a section after a bounds measurement that
+    // produced nothing.
     if (!box || box.isEmpty()) return;
     this.extent = box.getSize(new THREE.Vector3());
     this.center = box.getCenter(new THREE.Vector3());
