@@ -10,12 +10,13 @@ import { Separator } from "@/components/ui/separator";
  * Inspector for the picked USD prim.
  *
  * Shaped like the IFC attribute inspector on purpose — same collapsible rows,
- * same copyable identifiers — so the two tabs feel like one tool. What differs
- * is what there IS to show: the path (the identity) and the per-mesh geometry
- * facts. The layer itself does carry the IFC metadata now — the converter
- * authors `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus Tag, Name and every
- * pset value) onto each element prim — but this panel reads the picked MESH,
- * not the authored attributes, so it stays a geometry view.
+ * same copyable identifiers — so the two tabs feel like one tool. What it shows:
+ * the path, the decoded storey/category/element, the element's **GlobalId**, and
+ * the per-mesh geometry facts alongside every `omni:hoops:metadata:*` field the
+ * converter authored for that element (`IFCWALL:Tag`, psets, …), all filterable.
+ * The GlobalId appears both as an identifier above and inside the full field
+ * list below — deliberately: the top row is the thing you match on, the list is
+ * what the layer actually carries.
  */
 export function UsdSelectionDetail() {
   const selection = useUsdStore((s) => s.selection);
@@ -60,6 +61,9 @@ export function UsdSelectionDetail() {
         {selection.ifc.storey ? <Row label="Storey" value={selection.ifc.storey} /> : null}
         {selection.ifc.category ? <Row label="Category" value={selection.ifc.category} /> : null}
         {selection.ifc.element ? <Row label="Element" value={selection.ifc.element} /> : null}
+        {selection.globalId ? (
+          <Row label="GlobalId" value={selection.globalId} mono testId="usd-global-id" />
+        ) : null}
 
         <div className="pt-2">
           <input

@@ -65,8 +65,18 @@ export interface UsdPrimInfo {
   rootPrim: string;
   name: string;
   ifc: UsdIfcPathInfo;
-  /** Geometry facts, plus the material name when the layer carried one. */
+  /**
+   * Geometry facts and the material name, plus every
+   * `omni:hoops:metadata:*` field the converter authored for the element this
+   * prim belongs to — `IFCWALL:GlobalId`, `IFCWALL:Tag`, psets, …
+   */
   attributes: Record<string, string>;
+  /**
+   * The element's own IFC GlobalId, lifted out of `attributes` so the panel can
+   * show it alongside the other identifiers. Absent when the layer predates
+   * `--convert-metadata`, or when the prim carries no GlobalId at all.
+   */
+  globalId?: string;
 }
 
 export type UsdLoadStatus =
