@@ -40,11 +40,14 @@ plane, frame-all, the right-hand inspector — and differ only in what they load
 - **Prim inspector**: the full USD prim path (copyable), the storey, category and
   element name decoded from that path, and per-mesh geometry facts.
 
-The two tabs are complementary, not alternatives: **the USD carries geometry, not
-semantics.** There is no `GlobalId` anywhere in it — prim names embed *Revit*
-ids, and the IFC category is a path segment. Property sets, room names and
-quantities only exist in the IFC, which stays the source of truth for anything
-you would quote back in an edit request.
+The two tabs are complementary, not alternatives: the USD layer now carries
+**geometry AND semantics.** The converter runs with `--convert-metadata`, which
+authors `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus `Tag` — the Revit element
+id — `Name`, `PredefinedType` and every pset value) onto each element prim, so a
+prim matches back to its IFC element without guessing from its name. The IFC
+stays the source of truth for anything you would quote back in an edit request,
+and the prim inspector still reports geometry facts only — it reads the picked
+mesh, not those authored attributes.
 
 ## The USD pipeline, and why each step exists
 
@@ -175,11 +178,14 @@ plane, frame-all, the right-hand inspector — and differ only in what they load
 - **Prim inspector**: the full USD prim path (copyable), the storey, category and
   element name decoded from that path, and per-mesh geometry facts.
 
-The two tabs are complementary, not alternatives: **the USD carries geometry, not
-semantics.** There is no `GlobalId` anywhere in it — prim names embed *Revit*
-ids, and the IFC category is a path segment. Property sets, room names and
-quantities only exist in the IFC, which stays the source of truth for anything
-you would quote back in an edit request.
+The two tabs are complementary, not alternatives: the USD layer now carries
+**geometry AND semantics.** The converter runs with `--convert-metadata`, which
+authors `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus `Tag` — the Revit element
+id — `Name`, `PredefinedType` and every pset value) onto each element prim, so a
+prim matches back to its IFC element without guessing from its name. The IFC
+stays the source of truth for anything you would quote back in an edit request,
+and the prim inspector still reports geometry facts only — it reads the picked
+mesh, not those authored attributes.
 
 ## The USD pipeline, and why each step exists
 
