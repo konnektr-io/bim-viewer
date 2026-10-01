@@ -45,11 +45,13 @@
  * SEGMENT. The layer DOES carry the IFC identity since the conversion started
  * running with `--convert-metadata`: every element prim holds
  * `omni:hoops:metadata:<IFCTYPE>:GlobalId` (plus Tag, Name and every pset
- * value). The composer does not hand those authored attributes back to a picked
- * mesh, though — they live on the parsed spec, not on `userData` — so the path
- * stays the identity here and the IFC tab stays the source for semantics.
+ * value). three never hands those back to a picked mesh — they sit on a
+ * composer instance created inside `USDLoader.parse()` — so `usdMetadata.ts`
+ * captures them at the parser seam and `describe()` reports them, and the path
+ * remains the handle selections and isolations are resolved against.
  */
 import { USDLoader } from "three/examples/jsm/loaders/USDLoader.js";
+import { installMetadataCapture, readMetadata } from "./usdMetadata";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import * as THREE from "three";
 
@@ -423,6 +425,11 @@ export class UsdEngine {
       `USDZ received (${(buf.byteLength / 1e6).toFixed(1)} MB) — composing meshes…`,
     );
     const loader = new USDLoader();
+    // Index the IFC metadata the converter authored into the layer BEFORE the
+    // loader parses, since the capture wraps USDAParser.parseData — the loader
+    // keeps the result on a composer instance it never hands out (see
+    // usdMetadata.ts for why a wrap and not a second parse).
+    installMetadataCapture();
     // The composer is synchronous and heavy (~15 s of parse for the 39 MB
     // package), so yield to the browser first or the status line never paints.
     await new Promise((resolve) => setTimeout(resolve, 16));
@@ -1038,7 +1045,12 @@ export class UsdEngine {
     section.apply(state, this.renderer ?? undefined);
   }
 
-  /** The USD prim's own attributes, plus what the path encodes. */
+  /**
+   * The USD prim's own attributes: the per-mesh geometry facts, plus the IFC
+   * fields the converter authored into the layer for the element this mesh
+   * belongs to — `IFCWALL:GlobalId`, `IFCWALL:Tag`, psets, and so on
+   * (see usdMetadata.ts).
+   */
   private describe(mesh: THREE.Mesh): UsdPrimInfo {
     const usd = userDataOf(mesh);
     const path = usd.usdPath ?? "";
@@ -1063,12 +1075,20 @@ export class UsdEngine {
         attributes.material = String(anyMaterial.name || anyMaterial.type || "default");
       }
     }
+    // IFC fields for the element this mesh hangs off. Their labels carry the
+    // HOOPS type (`IFCWALL:GlobalId`), so they cannot collide with the
+    // geometry keys above, and the metadata walk also yields the element's own
+    // GlobalId — the id everything else is matched on.
+    const { rows, globalId } = readMetadata(path);
+    Object.assign(attributes, rows);
+
     return {
       path,
       rootPrim: usd.rootPrim ?? path.split("/")[1] ?? "",
       name: path.split("/").pop() ?? path,
       ifc: usd.ifc ?? describeIfcPath(path),
       attributes,
+      ...(globalId ? { globalId } : {}),
     };
   }
 
