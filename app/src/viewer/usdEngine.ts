@@ -60,6 +60,7 @@ import { SectionPlane, type SectionState } from "./sectionPlane";
 import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
 import type { UsdLayer, UsdManifest, UsdPrimInfo, UsdIfcPathInfo } from "./usdTypes";
 import type { AssetNode } from "@/components/AssetTree";
+import { SplatLayer, type SplatLayerStatus, type SplatTransform } from "./splatLayer";
 
 export type { ViewPreset };
 
@@ -172,6 +173,8 @@ export class UsdEngine {
   private controls: import("three/addons/controls/OrbitControls.js").OrbitControls | null = null;
   private viewCube: ViewCube | null = null;
   private sectionPlane: SectionPlane | null = null;
+  /** Optional Gaussian-splat overlay (see splatLayer.ts for why non-uniform scale). */
+  private splatLayer: SplatLayer | null = null;
 
   /** Every mesh, with its prim path resolved once at load. */
   private meshes: THREE.Mesh[] = [];
@@ -1282,9 +1285,45 @@ export class UsdEngine {
     };
   }
 
+  /**
+   * Attach a Gaussian-splat overlay (.spz/.ply/.splat) to the loaded house.
+   * Resolves with the real splat count once the file has been parsed, so a
+   * caller reports a number rather than "it did not throw".
+   */
+  async loadSplat(url: string, transform?: Partial<SplatTransform>): Promise<SplatLayerStatus> {
+    if (!this.scene || !this.renderer) {
+      throw new Error("load the USD scene before attaching a splat");
+    }
+    this.splatLayer ??= new SplatLayer(this.scene, this.renderer);
+    return this.splatLayer.load(url, transform);
+  }
+
+  setSplatTransform(patch: Partial<SplatTransform>): SplatTransform | null {
+    return this.splatLayer?.setTransform(patch) ?? null;
+  }
+
+  getSplatTransform(): SplatTransform | null {
+    return this.splatLayer?.getTransform() ?? null;
+  }
+
+  getSplatStatus(): SplatLayerStatus | null {
+    return this.splatLayer?.status ?? null;
+  }
+
+  /** Debug hook: the live splat mesh/renderer, or nulls. */
+  getSplatDebug(): { mesh: unknown; spark: unknown } | null {
+    return this.splatLayer ? this.splatLayer.debug : null;
+  }
+
+  unloadSplat(): void {
+    this.splatLayer?.unload();
+  }
+
   dispose(): void {
     cancelAnimationFrame(this.frameHandle);
     this.controls?.dispose();
+    this.splatLayer?.dispose();
+    this.splatLayer = null;
     this.renderer?.dispose();
     this.renderer?.domElement?.remove();
     this.viewCube?.element.remove();

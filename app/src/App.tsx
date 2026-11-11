@@ -7,6 +7,7 @@ import { UsdSelectionDetail } from "@/components/UsdSelectionDetail";
 import { ViewControls } from "@/components/ViewControls";
 import { SectionControls, SectionToggle } from "@/components/SectionControls";
 import { ModelTree } from "@/components/ModelTree";
+import { SplatControls } from "@/components/SplatControls";
 import { ViewerCanvas } from "@/components/ViewerCanvas";
 import { CollapsiblePanel } from "@/components/CollapsiblePanel";
 import { useUsdStore } from "@/store/usdStore";
@@ -136,6 +137,7 @@ export default function App() {
         {format === "usd" && usdReady ? (
           <>
             <SectionPanel format="usd" />
+            <SplatControls />
             <UsdSelectionDetail />
           </>
         ) : null}

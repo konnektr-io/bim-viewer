@@ -290,7 +290,11 @@ async def _s3_stream(key: str) -> Response:
     out_headers: dict[str, str] = {
         "cache-control": "public, max-age=3600, must-revalidate",
     }
-    if key.endswith(".usdz"):
+    if key.endswith((".ply", ".spz", ".splat", ".ksplat")):
+        # Splats are binary and fetched as an ArrayBuffer by the viewer. Serving
+        # them as text/plain invites a proxy to transcode or re-encode them.
+        out_headers["content-type"] = "application/octet-stream"
+    elif key.endswith(".usdz"):
         # The package must arrive byte-identical: the loader's first check is
         # bytes[0]===0x50 && bytes[1]===0x4B, and any content-encoding fails it
         # and silently falls through to the ASCII path.
@@ -389,6 +393,22 @@ async def usd_scene_package() -> Response:
     if not isinstance(name, str) or not name:
         log.error("USD manifest has no usable `packageFile`/`file` key")
         raise HTTPException(status_code=503, detail="usd manifest broken")
+    return await _s3_stream(_usd_key(name))
+
+
+@app.get("/api/splat")
+async def splat_scene() -> Response:
+    """Stream the optional Gaussian-splat overlay.
+
+    Deliberately in the same bucket and prefix as the USD scene: the splat is an
+    artifact of the same build, it must be reachable from the same origin the app
+    is served from (a local path on the build machine is useless to a browser
+    somewhere else), and reusing the prefix means no second credential or bucket
+    to keep in sync. `SPLAT_FILE` renames it without a code change; the error is
+    404 rather than 503 when it is absent, because "there is no splat for this
+    scene" is a normal state, not a misconfiguration.
+    """
+    name = os.environ.get("SPLAT_FILE", "splat.ply")
     return await _s3_stream(_usd_key(name))
 
 
