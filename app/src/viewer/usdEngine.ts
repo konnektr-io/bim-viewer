@@ -245,14 +245,6 @@ export class UsdEngine {
     const height = container.clientHeight || 1;
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 5000);
     camera.position.set(24, 18, 24);
-    /*
-     * The USD packages this viewer serves are authored Z-up (`upAxis = "Z"`; the
-     * flat stage that ships also declares metersPerUnit = 1.0). three.js defaults
-     * to Y-up and three's USDLoader does not convert, so without this the house
-     * renders lying on its side and every vertical measurement — and any overlay
-     * placed in stage coordinates — reads as tilted.
-     */
-    camera.up.set(0, 0, 1);
     this.camera = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -1316,6 +1308,11 @@ export class UsdEngine {
 
   getSplatStatus(): SplatLayerStatus | null {
     return this.splatLayer?.status ?? null;
+  }
+
+  /** Debug hook: the live splat mesh/renderer, or nulls. */
+  getSplatDebug(): { mesh: unknown; spark: unknown } | null {
+    return this.splatLayer ? this.splatLayer.debug : null;
   }
 
   unloadSplat(): void {

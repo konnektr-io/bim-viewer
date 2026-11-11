@@ -93,9 +93,13 @@ export class SplatLayer {
         renderer: this.renderer,
         onDirty: () => this.requestRender?.(),
       });
+      // Spark draws through this object; if it is culled the splats vanish even
+      // though the mesh is in view, so it must never be frustum-culled.
+      this.spark.frustumCulled = false;
       this.scene.add(this.spark);
     }
     const mesh = new SplatMesh({ url });
+    mesh.frustumCulled = false;
     this.mesh = mesh;
     this.url = url;
     this.scene.add(mesh);
@@ -133,6 +137,11 @@ export class SplatLayer {
       this.spark.dispose();
       this.spark = null;
     }
+  }
+
+  /** Debug hooks for headless verification: what actually reached the scene. */
+  get debug(): { mesh: SplatMesh | null; spark: SparkRenderer | null } {
+    return { mesh: this.mesh, spark: this.spark };
   }
 
   private apply(): void {
