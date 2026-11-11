@@ -60,6 +60,7 @@ import { SectionPlane, type SectionState } from "./sectionPlane";
 import { VIEW_PRESETS, type ViewPreset } from "./viewPresets";
 import type { UsdLayer, UsdManifest, UsdPrimInfo, UsdIfcPathInfo } from "./usdTypes";
 import type { AssetNode } from "@/components/AssetTree";
+import { SplatLayer, type SplatLayerStatus, type SplatTransform } from "./splatLayer";
 
 export type { ViewPreset };
 
@@ -172,6 +173,8 @@ export class UsdEngine {
   private controls: import("three/addons/controls/OrbitControls.js").OrbitControls | null = null;
   private viewCube: ViewCube | null = null;
   private sectionPlane: SectionPlane | null = null;
+  /** Optional Gaussian-splat overlay (see splatLayer.ts for why non-uniform scale). */
+  private splatLayer: SplatLayer | null = null;
 
   /** Every mesh, with its prim path resolved once at load. */
   private meshes: THREE.Mesh[] = [];
@@ -242,6 +245,14 @@ export class UsdEngine {
     const height = container.clientHeight || 1;
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 5000);
     camera.position.set(24, 18, 24);
+    /*
+     * The USD packages this viewer serves are authored Z-up (`upAxis = "Z"`; the
+     * flat stage that ships also declares metersPerUnit = 1.0). three.js defaults
+     * to Y-up and three's USDLoader does not convert, so without this the house
+     * renders lying on its side and every vertical measurement — and any overlay
+     * placed in stage coordinates — reads as tilted.
+     */
+    camera.up.set(0, 0, 1);
     this.camera = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -1282,9 +1293,40 @@ export class UsdEngine {
     };
   }
 
+  /**
+   * Attach a Gaussian-splat overlay (.spz/.ply/.splat) to the loaded house.
+   * Resolves with the real splat count once the file has been parsed, so a
+   * caller reports a number rather than "it did not throw".
+   */
+  async loadSplat(url: string, transform?: Partial<SplatTransform>): Promise<SplatLayerStatus> {
+    if (!this.scene || !this.renderer) {
+      throw new Error("load the USD scene before attaching a splat");
+    }
+    this.splatLayer ??= new SplatLayer(this.scene, this.renderer);
+    return this.splatLayer.load(url, transform);
+  }
+
+  setSplatTransform(patch: Partial<SplatTransform>): SplatTransform | null {
+    return this.splatLayer?.setTransform(patch) ?? null;
+  }
+
+  getSplatTransform(): SplatTransform | null {
+    return this.splatLayer?.getTransform() ?? null;
+  }
+
+  getSplatStatus(): SplatLayerStatus | null {
+    return this.splatLayer?.status ?? null;
+  }
+
+  unloadSplat(): void {
+    this.splatLayer?.unload();
+  }
+
   dispose(): void {
     cancelAnimationFrame(this.frameHandle);
     this.controls?.dispose();
+    this.splatLayer?.dispose();
+    this.splatLayer = null;
     this.renderer?.dispose();
     this.renderer?.domElement?.remove();
     this.viewCube?.element.remove();

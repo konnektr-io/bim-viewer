@@ -9,6 +9,7 @@ import { useEffect, useRef } from "react";
 
 import { useUsdStore } from "@/store/usdStore";
 import { UsdEngine } from "@/viewer/usdEngine";
+import { transformFromParams } from "@/viewer/splatLayer";
 
 export function UsdCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -48,13 +49,31 @@ export function UsdCanvas() {
         /* the header falls back to the default */
       });
 
-    engine.load(container).then(() => {
+    engine.load(container).then(async () => {
       // The tree is built from the prim paths recorded during load, so it is
       // free now and never needs rebuilding.
       try {
         useUsdStore.getState().setTree(engine.buildTree());
       } catch (err) {
         console.warn("[usd] tree build failed", err);
+      }
+
+      // Optional Gaussian-splat overlay, driven entirely by the URL so the
+      // house itself stays untouched:
+      //   ?splat=/splats/living.spz&sx=..&sy=..&sz=..&yaw=..&tx=..&ty=..&tz=..
+      const params = new URLSearchParams(window.location.search);
+      const splatUrl = params.get("splat");
+      if (splatUrl) {
+        try {
+          const status = await engine.loadSplat(splatUrl, transformFromParams(params));
+          console.info(
+            `[splat] ${status.splatCount.toLocaleString()} splats from ${status.url}`,
+            status.transform,
+          );
+        } catch (err) {
+          // Never let an overlay take the house down: the scene is already up.
+          console.warn("[splat] overlay failed to load", err);
+        }
       }
     }).catch((err) => {
       store.setError(err instanceof Error ? err.message : String(err));
