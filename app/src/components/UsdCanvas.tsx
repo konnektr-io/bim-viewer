@@ -62,7 +62,10 @@ export function UsdCanvas() {
       // house itself stays untouched:
       //   ?splat=/splats/living.spz&sx=..&sy=..&sz=..&yaw=..&tx=..&ty=..&tz=..
       const params = new URLSearchParams(window.location.search);
-      const splatUrl = params.get("splat");
+      // `?splat=1` means "the splat for this scene", served from the same origin;
+      // any other value is treated as an explicit URL.
+      const splatParam = params.get("splat");
+      const splatUrl = splatParam === "1" ? "/api/splat" : splatParam;
       if (splatUrl) {
         try {
           const status = await engine.loadSplat(splatUrl, transformFromParams(params));
