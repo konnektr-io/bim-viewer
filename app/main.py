@@ -248,7 +248,7 @@ async def _s3_get_bytes(key: str, timeout: float = 30.0) -> bytes:
     return response.content
 
 
-async def _s3_stream(key: str) -> Response:
+async def _s3_stream(key: str, request: Request | None = None, revalidate: bool = False) -> Response:
     """Proxy one object straight through to the browser.
 
     The body is served EXACTLY as stored. A `.gz` object keeps its bytes and
@@ -265,6 +265,13 @@ async def _s3_stream(key: str) -> Response:
     signed = sign_get(
         config, method="GET", key=key, now=dt.datetime.now(dt.timezone.utc), byte_range=None
     )
+    # Revalidation, not a clock. `max-age` on a mutable object is a lie the
+    # browser believes: it served a 94 MB placeholder for an hour after the real
+    # capture had replaced it, because a fresh entry is never rechecked. With
+    # `no-cache` the client asks every time and an unchanged object costs a 304.
+    conditional = request.headers.get("if-none-match") if (revalidate and request) else None
+    if conditional:
+        signed["headers"] = {**signed["headers"], "if-none-match": conditional}
     # The client deliberately outlives this handler: StreamingResponse consumes
     # the body after the endpoint returns, so a `with` block would close the
     # connection first. It is closed in the generator's finally.
@@ -277,6 +284,10 @@ async def _s3_stream(key: str) -> Response:
         log.error("S3 request failed for %s: %s", key, exc)
         raise HTTPException(status_code=502, detail="storage unreachable") from exc
 
+    if upstream.status_code == 304:
+        await upstream.aclose()
+        await client.aclose()
+        return Response(status_code=304, headers={"cache-control": "no-cache"})
     if upstream.status_code != 200:
         detail = await upstream.aread()
         await upstream.aclose()
@@ -288,7 +299,7 @@ async def _s3_stream(key: str) -> Response:
         )
 
     out_headers: dict[str, str] = {
-        "cache-control": "public, max-age=3600, must-revalidate",
+        "cache-control": "no-cache" if revalidate else "public, max-age=3600, must-revalidate",
     }
     if key.endswith((".ply", ".spz", ".splat", ".ksplat")):
         # Splats are binary and fetched as an ArrayBuffer by the viewer. Serving
@@ -397,7 +408,7 @@ async def usd_scene_package() -> Response:
 
 
 @app.get("/api/splat")
-async def splat_scene() -> Response:
+async def splat_scene(request: Request) -> Response:
     """Stream the optional Gaussian-splat overlay.
 
     Deliberately in the same bucket and prefix as the USD scene: the splat is an
@@ -409,7 +420,11 @@ async def splat_scene() -> Response:
     scene" is a normal state, not a misconfiguration.
     """
     name = os.environ.get("SPLAT_FILE", "splat.ply")
-    return await _s3_stream(_usd_key(name))
+    # `revalidate`: the object keeps its key when a new capture is promoted, so
+    # its bytes change without the URL changing. Anything cached by age will
+    # show a previous capture and the user reads that as "you gave me the fake
+    # one".
+    return await _s3_stream(_usd_key(name), request=request, revalidate=True)
 
 
 @app.api_route("/api/model/{slug}", methods=["GET", "HEAD"])
