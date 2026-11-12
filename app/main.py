@@ -156,6 +156,25 @@ def get_s3() -> S3Config:
     return _s3
 
 
+@app.middleware("http")
+async def static_cache_headers(request: Request, call_next):
+    """Content-hashed assets are immutable; the shell must never be.
+
+    Without this the SPA shell (`/`, `/usd`) was served with a bare ETag and
+    browsers applied heuristic freshness to it, so a deploy kept loading the
+    PREVIOUS bundle hash from cache and the fix never reached the user — the
+    symptom is "I still see the old behaviour" while the server is demonstrably
+    serving the new file.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/assets/") or path.startswith("/wasm/"):
+        response.headers["cache-control"] = "public, max-age=31536000, immutable"
+    elif not path.startswith("/api/") and path != "/healthz":
+        response.headers["cache-control"] = "no-cache"
+    return response
+
+
 @app.get("/healthz")
 def healthz() -> Response:
     return Response("ok", media_type="text/plain")
