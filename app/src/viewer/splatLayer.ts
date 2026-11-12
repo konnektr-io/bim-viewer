@@ -36,13 +36,13 @@ export interface SplatTransform {
 
 export const IDENTITY_SPLAT_TRANSFORM: SplatTransform = {
   scaleX: 1,
-  scaleY: 1,
+  scaleY: 0.685,
   scaleZ: 1,
-  yawDeg: 0,
-  tiltDeg: -90,
-  tx: 0,
-  ty: 0,
-  tz: 0,
+  yawDeg: -38.5,
+  tiltDeg: 90,
+  tx: -13.8,
+  ty: 7.5,
+  tz: -6.65,
 };
 
 export interface SplatLayerStatus {
