@@ -31,6 +31,10 @@ const FIELDS: {
   { key: "scaleY", label: "scale Y", min: 0.01, max: 3, step: 0.005 },
   { key: "scaleZ", label: "scale Z", min: 0.01, max: 3, step: 0.005 },
   { key: "yawDeg", label: "yaw °", min: -180, max: 180, step: 0.5 },
+  // The missing degree of freedom: -90 lays a Z-up capture into the Y-up scene
+  // upright, +90 does the same with the cloud inverted (−90 and +90 differ by
+  // 180° of tilt, and the reconstruction's vertical sign is arbitrary).
+  { key: "tiltDeg", label: "tilt ° (X)", min: -180, max: 180, step: 1 },
   { key: "tx", label: "move X", min: -30, max: 30, step: 0.05 },
   { key: "ty", label: "move Y", min: -30, max: 30, step: 0.05 },
   { key: "tz", label: "move Z", min: -30, max: 30, step: 0.05 },

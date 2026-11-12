@@ -25,6 +25,10 @@ export interface SplatTransform {
   scaleZ: number;
   /** Rotation about the scene's vertical axis, in degrees. */
   yawDeg: number;
+  /** Rotation about X, in degrees. -90 converts the Z-up splat into a Y-up
+   *  scene; +90 does the same but keeps the cloud the other way up, which is
+   *  what you want when the reconstruction's vertical axis came out inverted. */
+  tiltDeg: number;
   tx: number;
   ty: number;
   tz: number;
@@ -35,6 +39,7 @@ export const IDENTITY_SPLAT_TRANSFORM: SplatTransform = {
   scaleY: 1,
   scaleZ: 1,
   yawDeg: 0,
+  tiltDeg: -90,
   tx: 0,
   ty: 0,
   tz: 0,
@@ -156,7 +161,11 @@ export class SplatLayer {
     // Order 'YXZ' composes as Ry(yaw) * Rx(-90deg) * Rz, i.e. stand it upright
     // first, then spin it about the world's vertical axis.
     this.mesh.rotation.order = "YXZ";
-    this.mesh.rotation.set(-Math.PI / 2, THREE.MathUtils.degToRad(t.yawDeg), 0);
+    this.mesh.rotation.set(
+      THREE.MathUtils.degToRad(t.tiltDeg),
+      THREE.MathUtils.degToRad(t.yawDeg),
+      0,
+    );
     this.mesh.position.set(t.tx, t.ty, t.tz);
     this.mesh.updateMatrixWorld(true);
     this.requestRender?.();
@@ -174,11 +183,13 @@ export function transformFromParams(params: URLSearchParams): Partial<SplatTrans
   const out: Partial<SplatTransform> = {};
   const sx = num("sx"), sy = num("sy"), sz = num("sz");
   const yaw = num("yaw");
+  const tilt = num("tilt");
   const tx = num("tx"), ty = num("ty"), tz = num("tz");
   if (sx !== undefined) out.scaleX = sx;
   if (sy !== undefined) out.scaleY = sy;
   if (sz !== undefined) out.scaleZ = sz;
   if (yaw !== undefined) out.yawDeg = yaw;
+  if (tilt !== undefined) out.tiltDeg = tilt;
   if (tx !== undefined) out.tx = tx;
   if (ty !== undefined) out.ty = ty;
   if (tz !== undefined) out.tz = tz;
