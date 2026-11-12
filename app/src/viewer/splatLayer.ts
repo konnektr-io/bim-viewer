@@ -148,7 +148,15 @@ export class SplatLayer {
     if (!this.mesh) return;
     const t = this.transform;
     this.mesh.scale.set(t.scaleX, t.scaleY, t.scaleZ);
-    this.mesh.rotation.set(0, THREE.MathUtils.degToRad(t.yawDeg), 0);
+    // The splat file is Z-up (same convention as the USD stage), but the scene
+    // is three.js Y-up: the USD composer converts the house with
+    // `rootGroup.rotation.x = -PI/2`. Without the same conversion here the cloud
+    // is displayed lying on its side, and yaw about Y cannot fix a tilt — the
+    // reported symptom was "it's on its side and I couldn't rotate".
+    // Order 'YXZ' composes as Ry(yaw) * Rx(-90deg) * Rz, i.e. stand it upright
+    // first, then spin it about the world's vertical axis.
+    this.mesh.rotation.order = "YXZ";
+    this.mesh.rotation.set(-Math.PI / 2, THREE.MathUtils.degToRad(t.yawDeg), 0);
     this.mesh.position.set(t.tx, t.ty, t.tz);
     this.mesh.updateMatrixWorld(true);
     this.requestRender?.();
