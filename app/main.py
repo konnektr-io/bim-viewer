@@ -407,6 +407,106 @@ async def usd_scene_package() -> Response:
     return await _s3_stream(_usd_key(name))
 
 
+SPLAT_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+async def _s3_size_and_etag(config: S3Config, key: str) -> tuple[int, str | None]:
+    """Total size and ETag without downloading the object.
+
+    A one-byte Range GET rather than HEAD: `sign_get` signs the verb it is told,
+    and SigV4 covers the method, so signing HEAD and sending GET is a
+    SignatureDoesNotMatch. A 206 carrying `content-range: bytes 0-0/<total>`
+    answers both questions in ~1 byte.
+    """
+    signed = sign_get(
+        config, method="GET", key=key, now=dt.datetime.now(dt.timezone.utc), byte_range="bytes=0-0"
+    )
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0), follow_redirects=True) as client:
+        resp = await client.get(signed["url"], headers=signed["headers"])
+        if resp.status_code not in (200, 206):
+            raise HTTPException(
+                status_code=404 if resp.status_code == 404 else 502,
+                detail="usd scene not found" if resp.status_code == 404 else "storage error",
+            )
+        content_range = resp.headers.get("content-range", "")
+        total = int(content_range.rsplit("/", 1)[1]) if "/" in content_range else int(resp.headers.get("content-length") or 0)
+        return total, resp.headers.get("etag")
+
+
+async def _s3_stream_chunked(key: str, request: Request) -> Response:
+    """Stream a large mutable object as a series of short ranged upstream reads.
+
+    The storage backend drops connections whose consumer is slow: measured on a
+    direct presigned URL, a 1 MB/s reader got 17 MB of 94,401,477 bytes and the
+    socket closed, while the same URL at full speed returned everything in
+    0.74 s. Proxying straight through therefore truncates for any client slower
+    than the storage's patience, and the browser reports it as
+    `ERR_HTTP2_PROTOCOL_ERROR` / "network error" with no further detail.
+
+    Reading one bounded range at a time inverts the problem: each upstream
+    request is a fast whole-range read that finishes immediately, and the slow
+    client only stalls OUR send, which nothing times out. `content-length` is
+    the full object size, so the response is still one normal body.
+    """
+    import asyncio
+
+    try:
+        config = get_s3()
+    except RuntimeError as exc:
+        log.error("S3 not configured: %s", exc)
+        raise HTTPException(status_code=503, detail="storage not configured") from exc
+
+    total, etag = await _s3_size_and_etag(config, key)
+    if not total:
+        raise HTTPException(status_code=404, detail="usd scene not found")
+
+    # Revalidation, not a clock: the object keeps its key across captures, so an
+    # age-based policy serves a previous capture for the whole TTL.
+    if_none_match = request.headers.get("if-none-match", "")
+    if etag and if_none_match and if_none_match.strip() == etag:
+        return Response(status_code=304, headers={"cache-control": "no-cache", "etag": etag})
+
+    async def body() -> AsyncIterator[bytes]:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), follow_redirects=True) as client:
+            offset = 0
+            while offset < total:
+                end = min(offset + SPLAT_CHUNK_BYTES, total) - 1
+                data = b""
+                for attempt in range(3):
+                    signed = sign_get(
+                        config,
+                        method="GET",
+                        key=key,
+                        now=dt.datetime.now(dt.timezone.utc),
+                        byte_range=f"bytes={offset}-{end}",
+                    )
+                    try:
+                        resp = await client.get(signed["url"], headers=signed["headers"])
+                        if resp.status_code not in (200, 206):
+                            raise RuntimeError(f"range {offset}-{end} -> {resp.status_code}")
+                        data = resp.content
+                        if not data:
+                            raise RuntimeError(f"range {offset}-{end} came back empty")
+                        break
+                    except Exception as exc:  # retry a chunk, never the whole body
+                        if attempt == 2:
+                            log.error("splat chunk %s-%s failed: %s", offset, end, exc)
+                            raise
+                        await asyncio.sleep(0.25 * (attempt + 1))
+                yield data
+                offset = end + 1
+
+    headers = {
+        "content-type": "application/octet-stream",
+        "content-length": str(total),
+        "accept-ranges": "bytes",
+        "cache-control": "no-cache",
+    }
+    if etag:
+        headers["etag"] = etag
+    return StreamingResponse(body(), headers=headers)
+
+
 @app.get("/api/splat")
 async def splat_scene(request: Request) -> Response:
     """Stream the optional Gaussian-splat overlay.
@@ -420,11 +520,7 @@ async def splat_scene(request: Request) -> Response:
     scene" is a normal state, not a misconfiguration.
     """
     name = os.environ.get("SPLAT_FILE", "splat.ply")
-    # `revalidate`: the object keeps its key when a new capture is promoted, so
-    # its bytes change without the URL changing. Anything cached by age will
-    # show a previous capture and the user reads that as "you gave me the fake
-    # one".
-    return await _s3_stream(_usd_key(name), request=request, revalidate=True)
+    return await _s3_stream_chunked(_usd_key(name), request)
 
 
 @app.api_route("/api/model/{slug}", methods=["GET", "HEAD"])
