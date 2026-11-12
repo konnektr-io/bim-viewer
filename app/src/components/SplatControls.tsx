@@ -10,7 +10,7 @@
  * the room. So the tool exposes them directly and reports them back as text that
  * can be baked into the USD.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { SplatTransform } from "@/viewer/splatLayer";
 import { CollapsiblePanel } from "@/components/CollapsiblePanel";
@@ -73,19 +73,53 @@ export function SplatControls() {
     if (next) setTransform(next);
   }, []);
 
-  const copyUrl = useCallback(() => {
-    if (!transform) return;
+  const url = useMemo(() => {
+    if (!transform) return "";
     const p = new URLSearchParams();
-    p.set("splat", status?.url ?? "");
+    // `splat=1` (not the resolved /api/splat) so the link means "this scene's
+    // splat" and survives a different environment.
+    p.set("splat", status?.url === "/api/splat" ? "1" : (status?.url ?? ""));
     p.set("sx", transform.scaleX.toFixed(4));
     p.set("sy", transform.scaleY.toFixed(4));
     p.set("sz", transform.scaleZ.toFixed(4));
     p.set("yaw", transform.yawDeg.toFixed(2));
+    p.set("tilt", transform.tiltDeg.toFixed(1));
     p.set("tx", transform.tx.toFixed(3));
     p.set("ty", transform.ty.toFixed(3));
     p.set("tz", transform.tz.toFixed(3));
-    void navigator.clipboard?.writeText(`${window.location.origin}/?${p.toString()}`);
+    // Keep the current route (/usd), not the site root: the root renders the
+    // default view, so a copied link would not reopen this overlay.
+    return `${window.location.origin}${window.location.pathname}?${p.toString()}`;
   }, [status, transform]);
+
+  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+
+  const copyUrl = useCallback(async () => {
+    if (!url) return;
+    // `navigator.clipboard` is async and rejects (permissions policy, insecure
+    // context, some browsers) — a fire-and-forget call fails silently, which is
+    // exactly "the button does nothing". Fall back to a selected textarea, and
+    // report the outcome either way.
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied("ok");
+    } catch {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied(ok ? "ok" : "fail");
+      } catch {
+        setCopied("fail");
+      }
+    }
+    window.setTimeout(() => setCopied("idle"), 2500);
+  }, [url]);
 
   if (!status || !transform) return null;
 
@@ -119,8 +153,18 @@ export function SplatControls() {
           className="mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-accent"
           data-testid="splat-copy"
         >
-          Copy URL with this transform
+          {copied === "ok" ? "Copied ✓" : copied === "fail" ? "Copy blocked — select below" : "Copy URL with this transform"}
         </button>
+        {/* Always visible: when the clipboard is blocked the value is still
+            recoverable with the mouse, instead of the button doing nothing. */}
+        <input
+          readOnly
+          value={url}
+          onFocus={(e) => e.currentTarget.select()}
+          className="mt-1 w-full rounded border border-border bg-muted px-2 py-1 font-mono text-[10px]"
+          data-testid="splat-url"
+          aria-label="Splat overlay URL"
+        />
       </div>
     </CollapsiblePanel>
   );
